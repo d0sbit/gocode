@@ -1,0 +1,10 @@
+
+{{template "SelectByID"}}
+func (s *{{Struct.Name}}Store) SelectByID(ctx ctx, {{Struct.KeysAsLocalVarList()}}) (*{{Struct.Name}}, error) {
+	var ret {{Struct.Name}}
+	err := s.col().FindOne(bg, bson.D{
+        {"_id", id}, // FIXME: make this dynamic
+    }).Decode(&ret)
+	return &ret, err
+}
+{{end}}
