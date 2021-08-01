@@ -36,15 +36,7 @@ type AddFuncDeclTransform struct {
 
 func (t *AddFuncDeclTransform) xform() {}
 
-// // AddGenDeclTransform is used to add a package-level var, const or type declaration.
-// type AddGenDeclTransform struct {
-// 	Filename string // write code to this file
-// 	Name     string // the const, var or type name
-// 	Text     string // the full declaration text including comments
-// 	Replace  bool   // if true then any existing declaration with the same name is replaced
-// }
-// func (t *AddGenDeclTransform) xform() {}
-
+// AddConstDeclTransform adds a const declaration.
 type AddConstDeclTransform struct {
 	Filename string   // write code to this file
 	NameList []string // the names
@@ -54,6 +46,7 @@ type AddConstDeclTransform struct {
 
 func (t *AddConstDeclTransform) xform() {}
 
+// AddVarDeclTransform adds a var declaration.
 type AddVarDeclTransform struct {
 	Filename string   // write code to this file
 	NameList []string // the names
@@ -63,6 +56,7 @@ type AddVarDeclTransform struct {
 
 func (t *AddVarDeclTransform) xform() {}
 
+// AddTypeDeclTransform adds a type declaration.
 type AddTypeDeclTransform struct {
 	Filename string // write code to this file
 	Name     string // the type name
@@ -83,12 +77,6 @@ type Transformers struct {
 func (ts *Transformers) Add(tl []Transform) {
 	ts.transformList = append(ts.transformList, tl...)
 }
-
-// func (ts *Transformers) AddImport(name, path string) {
-// 	ts.transformList = append(ts.transformList, ImportTransform{
-// 		Name: name, Path: path,
-// 	})
-// }
 
 // ParseTransforms will read Go source code and return a slice of the transforms indicated.
 // The snippet should not start with a package statement, import statements are allowed and
@@ -179,55 +167,31 @@ func ParseTransforms(filename, snippet string) (ret []Transform, reterr error) {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 
+			// FIXME: init() needs special handling - maybe use a hash of the function body to determine "is this the same"
+
 			tr := &AddFuncDeclTransform{
 				Filename: filename,
-				Name:     d.Name.Name,
 			}
 
-			// extract receiver type
-			if d.Recv.NumFields() == 1 {
-				switch typ := d.Recv.List[0].Type.(type) {
-				case *ast.Ident:
-					tr.ReceiverType = typ.Name
-				case *ast.StarExpr:
-					if i, ok := typ.X.(*ast.Ident); ok {
-						tr.ReceiverType = "*" + i.Name
-					} else {
-						return ret, fmt.Errorf("StarExpr with unknown X: %t / %v", typ.X, typ.X)
-					}
-				default:
-					return ret, fmt.Errorf("unexpected receiver type: %t / %v", typ, typ)
-				}
-			}
+			tr.ReceiverType, tr.Name = splitFuncDecl(d)
+
+			// // extract receiver type
+			// if d.Recv.NumFields() == 1 {
+			// 	switch typ := d.Recv.List[0].Type.(type) {
+			// 	case *ast.Ident:
+			// 		tr.ReceiverType = typ.Name
+			// 	case *ast.StarExpr:
+			// 		if i, ok := typ.X.(*ast.Ident); ok {
+			// 			tr.ReceiverType = "*" + i.Name
+			// 		} else {
+			// 			return ret, fmt.Errorf("StarExpr with unknown X: %t / %v", typ.X, typ.X)
+			// 		}
+			// 	default:
+			// 		return ret, fmt.Errorf("unexpected receiver type: %t / %v", typ, typ)
+			// 	}
+			// }
 
 			tr.Text = mkText(d, d.Doc)
-
-			// var sb strings.Builder
-			// var t, c string
-
-			// // extract text
-			// // fstart := d.Pos()
-			// // fend := d.End()
-			// // t = snippet[fset.Position(fstart).Offset:fset.Position(fend).Offset]
-			// t = sliceSnippet(d.Pos(), d.End())
-
-			// // check for comment
-			// if d.Doc != nil {
-			// 	// cstart := d.Doc.Pos()
-			// 	// cend := d.Doc.End()
-			// 	// c = snippet[fset.Position(cstart).Offset:fset.Position(cend).Offset]
-			// 	c = sliceSnippet(d.Doc.Pos(), d.Doc.End())
-			// }
-
-			// // put it all together
-			// sb.Grow(len(c) + len(t) + 1)
-			// sb.WriteString(c)
-			// if len(c) > 0 && !strings.HasSuffix(c, "\n") { // append \n to comment if not present
-			// 	sb.WriteByte('\n')
-			// }
-			// sb.WriteString(t)
-
-			// tr.Text = sb.String()
 
 			ret = append(ret, tr)
 
@@ -239,6 +203,8 @@ func ParseTransforms(filename, snippet string) (ret []Transform, reterr error) {
 				continue
 
 			case token.VAR:
+
+				// FIXME: what about declarations with the name "_" - decide what an appropriate behavior is
 
 				tr := &AddVarDeclTransform{
 					Filename: filename,
@@ -281,22 +247,6 @@ func ParseTransforms(filename, snippet string) (ret []Transform, reterr error) {
 				ret = append(ret, tr)
 
 			case token.TYPE:
-
-				// log.Printf("got var")
-				// ast.Print(&fset, d)
-
-				// whoops... types only have one name, but const and var can be a number - maybe
-				// we need to split out const or var as one type that supports multiple,
-				// and an AddTypeDeclTransform
-				// tr := &AddGenDeclTransform{
-				// 	Filename: filename,
-				// 	Name     string // the const, var or type name
-				// 	Text     string // the full declaration text including comments
-
-				// }
-
-				// // snippet[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset]
-				// ret = append(ret, tr)
 
 				tr := &AddTypeDeclTransform{
 					Filename: filename,
