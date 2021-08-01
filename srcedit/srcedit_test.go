@@ -84,6 +84,8 @@ func TestCheckFuncExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Logf("LocalName: %s", p.LocalName())
+
 	//must(t, p.WriteCodeBlock("test1/test1.go", "import \"log\"\nfunc ExampleFunc() { log.Printf(`ExampleFunc here`)}\n", true))
 	// must(t, p.WriteCodeBlock("test1/test1.go", "abcd", true))
 

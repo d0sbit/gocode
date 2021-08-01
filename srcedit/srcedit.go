@@ -19,9 +19,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+var identRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]*$`)
 
 // OSWorkingFSDir returns a filesystem at the OS root (of the drive on Windows) and the path of the current working directory.
 func OSWorkingFSDir() (fs.FS, string, error) {
@@ -95,9 +98,10 @@ func FindModuleDir(fsys fs.FS, startDir string) (string, error) {
 
 // Package provides methods to perform code edits on a package.
 type Package struct {
-	infs     fs.FS  // read files from
-	outfs    fs.FS  // write updated files to
-	fullName string // full package name
+	infs      fs.FS  // read files from
+	outfs     fs.FS  // write updated files to
+	fullName  string // full package name, import path
+	localName string // local name from package statements or default
 
 	fset *token.FileSet // Go parser needs this
 	astf []*ast.File    // each file that was parsed in the package
@@ -118,10 +122,10 @@ func (p *Package) FullName() string {
 	return p.fullName
 }
 
-// Name returns just the package name, e.g. given "a/b/c/", this will return "c".
-func (p *Package) Name() string {
-	_, n := path.Split(p.fullName)
-	return n
+// LocalName returns the name from the package statements inside the source files.
+// If no source files exist then a default is derived from the import path.
+func (p *Package) LocalName() string {
+	return p.localName
 }
 
 // Load will read in the package files and parse everything.
@@ -134,7 +138,9 @@ func (p *Package) Load() error {
 
 	p.fset = &token.FileSet{}
 	p.astf = make([]*ast.File, 0, len(fnl))
+	p.localName = ""
 
+	pkgNames := make([]string, 0, 1)
 	for _, fn := range fnl {
 		b, err := p.readFile(fn)
 		if err != nil {
@@ -144,10 +150,35 @@ func (p *Package) Load() error {
 		if err != nil {
 			return err
 		}
+		pkgNames = append(pkgNames, af.Name.Name)
 		p.astf = append(p.astf, af)
 		// NOTE: ParseDir returns an ast.Package but it doesn't have any additional info,
 		// a simple slice of *ast.File is just as well
 		// NOTE: if we need SSA we'll just call sslutil.BuildPackage somewhere around here
+	}
+
+	switch len(pkgNames) {
+	case 0:
+		// derive from full package name
+		_, n := path.Split(p.fullName)
+		n = strings.NewReplacer("-", "").Replace(n)
+		p.localName = n
+	case 1:
+		p.localName = pkgNames[0]
+	default:
+		for _, pn := range pkgNames {
+			if strings.HasSuffix(pn, "_test") { // _test package is okay, disregard
+				continue
+			}
+			if p.localName != "" {
+				return fmt.Errorf("multiple package names found: %v", pkgNames)
+			}
+			p.localName = pn
+		}
+	}
+
+	if !identRE.MatchString(p.localName) {
+		return fmt.Errorf("derived package name %q is not valid", p.localName)
 	}
 
 	return nil
