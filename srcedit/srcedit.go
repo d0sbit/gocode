@@ -8,6 +8,7 @@
 package srcedit
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -291,6 +292,25 @@ func (p *Package) fileNames() ([]string, error) {
 	return ret, nil
 }
 
+// writeFile is a helper so we don't have to cast outfs to a FileWriter all over the place
+func (p *Package) writeFile(fullPath string, data []byte, perm fs.FileMode) error {
+	fwriter, ok := p.outfs.(FileWriter)
+	if !ok {
+		return fmt.Errorf("p.outfs does not implement FileWriter, cannot write changes")
+	}
+	return fwriter.WriteFile(fullPath, data, perm)
+}
+
+// writeFileNamed is like writeFile but detects the FileMode from the existing file or uses 0644 default,
+// and only accepts the name of the file not the path (since we always write to the package folder anyway)
+func (p *Package) writeFileNamed(name string, data []byte) error {
+	dir, _ := path.Split(name)
+	if dir != "" {
+		return fmt.Errorf("name %q appears to have a directory, cannot be used with writeFileNamed", name)
+	}
+	return p.writeFile(path.Join(p.fullName, name), data, p.getFileModeOrDefault(name, 0644))
+}
+
 // ApplyTransforms calls ApplyTransform for each one provided.  Note that transforms
 // are not atomic and this may result in only a subset of the requested changes being applied
 // upon error.  Consider using a separate output filesystem if you're concerned about this.
@@ -310,72 +330,214 @@ func (p *Package) ApplyTransforms(tr ...Transform) error {
 // writing whatever output is needed to the output FS.
 func (p *Package) ApplyTransform(tr Transform) error {
 
-	fwriter, ok := p.outfs.(FileWriter)
-	if !ok {
-		return fmt.Errorf("p.outfs does not implement FileWriter, cannot write changes")
-	}
-
 	err := p.load()
 	if err != nil {
 		return err
 	}
 
 	switch t := tr.(type) {
+
 	case *AddFuncDeclTransform:
+		return p.applyAddFuncDecl(t)
 
-		// check if the func already exists in the package (could be in another file)
-		existingFilename, existingDecl := p.findFunc(t.ReceiverType, t.Name)
+	case *ImportTransform:
+		return p.applyImport(t)
 
-		if existingDecl != nil {
-			// if so and not replacing, no change needed
-			if !t.Replace {
-				return nil
-			} else {
-				// if so and replacing, write the file out with the specific portion omitted
+	case *AddConstDeclTransform:
+		panic("TODO AddConstDeclTransform")
 
-				endPos := existingDecl.End()
-				startPos := existingDecl.Pos()
-				if existingDecl.Doc != nil {
-					startPos = existingDecl.Doc.Pos() // begin at the comment if it exists
-				}
+	case *AddVarDeclTransform:
+		panic("TODO AddVarDeclTransform")
 
-				startOffset := p.fset.Position(startPos).Offset
-				endOffset := p.fset.Position(endPos).Offset
+	case *AddTypeDeclTransform:
+		panic("TODO AddTypeDeclTransform")
 
-				// local byte slice updated in case the code below writes to the same file
-				b := p.fileBytes[existingFilename]
-				b = append(b[:startOffset], b[endOffset:]...)
-				p.fileBytes[existingFilename] = b
-
-				existingFilePath := path.Join(p.fullName, existingFilename)
-				// FIXME: should detect file mode from either outfs or infs, whichever is present
-				err := fwriter.WriteFile(existingFilePath, b, getFileModeOrDefault(p.outfs, existingFilePath, 0755))
-				if err != nil {
-					return err
-				}
-
-			}
-		}
-
-		// then write out the file indicated in the transform with the new func added to the bottom
-		b := p.fileBytes[t.Filename]
-		if b == nil { // might be a new file, which we start with just a package statement
-			b = []byte("package " + p.localName + "\n\n")
-		}
-		b = append(b, t.Text...)
-		b = append(b, "\n"...)
-		fullPath := path.Join(p.fullName, t.Filename)
-		// FIXME: should detect file mode from either outfs or infs, whichever is present
-		err = fwriter.WriteFile(fullPath, b, getFileModeOrDefault(p.outfs, fullPath, 0755))
-		if err != nil {
-			return err
-		}
-
-	default:
-		return fmt.Errorf("unknown transform type: %t", tr)
 	}
 
-	return nil
+	return fmt.Errorf("unknown transform type: %t", tr)
+}
+
+func (p *Package) applyAddFuncDecl(t *AddFuncDeclTransform) error {
+
+	// check if the func already exists in the package (could be in another file)
+	existingFilename, existingDecl := p.findFunc(t.ReceiverType, t.Name)
+
+	if existingDecl != nil {
+		// if so and not replacing, no change needed
+		if !t.Replace {
+			return nil
+		} else {
+			// if so and replacing, write the file out with the specific portion omitted
+
+			endPos := existingDecl.End()
+			startPos := existingDecl.Pos()
+			if existingDecl.Doc != nil {
+				startPos = existingDecl.Doc.Pos() // begin at the comment if it exists
+			}
+
+			startOffset := p.fset.Position(startPos).Offset
+			endOffset := p.fset.Position(endPos).Offset
+
+			// local byte slice updated in case the code below writes to the same file
+			b := p.fileBytes[existingFilename]
+			b = append(b[:startOffset], b[endOffset:]...)
+			p.fileBytes[existingFilename] = b
+
+			// existingFilePath := path.Join(p.fullName, existingFilename)
+			err := p.writeFileNamed(existingFilename, b)
+			if err != nil {
+				return err
+			}
+
+		}
+	}
+
+	// then write out the file indicated in the transform with the new func added to the bottom
+	b := p.fileBytesOrNew(t.Filename)
+	b = append(b, t.Text...)
+	b = append(b, "\n"...)
+	return p.writeFileNamed(t.Filename, b)
+
+}
+
+func (p *Package) applyImport(t *ImportTransform) error {
+
+	// spin through and find the last import
+	// block and add a line there if it's a block,
+	// otherwise single import line, and if not that then
+	// find the package line and add after that.
+
+	b := p.fileBytes[t.Filename]
+
+	af := p.astf[t.Filename]
+	var lastImport *ast.GenDecl
+	if af != nil {
+		for _, decl := range af.Decls {
+			// find GenDecls
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			// that are imports
+			if genDecl.Tok != token.IMPORT {
+				continue
+			}
+
+			lastImport = genDecl
+		}
+	}
+
+	switch {
+
+	case lastImport != nil && lastImport.Rparen != token.NoPos:
+		// add line at end of import block
+
+		pos := p.fset.Position(lastImport.Rparen)
+
+		buf := make([]byte, 0, len(b)+len(t.Name)+len(t.Path)+16)
+		buf = append(buf, b[:pos.Offset]...)
+		// add newline before paren if missing
+		if buf[len(buf)-1] != '\n' {
+			buf = append(buf, "\n"...)
+		}
+		buf = append(buf, "\t"...)
+		if t.Name != "" {
+			buf = append(buf, t.Name...)
+			buf = append(buf, " "...)
+		}
+		buf = append(buf, "\""...)
+		buf = append(buf, t.Path...)
+		buf = append(buf, "\"\n"...)
+		buf = append(buf, b[pos.Offset:]...)
+
+		b = buf
+
+	case lastImport != nil:
+		// add separate import statement after last
+
+		pos := p.fset.Position(lastImport.End())
+
+		buf := make([]byte, 0, len(b)+len(t.Name)+len(t.Path)+16)
+		buf = append(buf, b[:pos.Offset]...)
+		// add newline before paren if missing
+		if buf[len(buf)-1] != '\n' {
+			buf = append(buf, "\n"...)
+		}
+		buf = append(buf, "import "...)
+		if t.Name != "" {
+			buf = append(buf, t.Name...)
+			buf = append(buf, " "...)
+		}
+		buf = append(buf, "\""...)
+		buf = append(buf, t.Path...)
+		buf = append(buf, "\"\n"...)
+		buf = append(buf, bytes.TrimPrefix(b[pos.Offset:], []byte("\n"))...)
+
+		b = buf
+
+	default:
+		// add first import statement after package line
+
+		// could be a file without imports or a brand new file we're creating now, no difference here
+		b = p.fileBytesOrNew(t.Filename)
+
+		// find package statement
+		// pkgre := regexp.MustCompile(`\n\s*package\s*.*`)
+		pkgre := regexp.MustCompile(`(?m)^\s*package\s*.*$`)
+		pkgidx := pkgre.FindIndex(b)
+		if pkgidx == nil {
+			return fmt.Errorf("unable to find package line in %q", t.Filename)
+		}
+
+		buf := make([]byte, 0, len(b)+len(t.Name)+len(t.Path)+16)
+		buf = append(buf, b[:pkgidx[1]]...)
+		buf = append(buf, "\n\n"...)
+		buf = append(buf, "import "...)
+		if t.Name != "" {
+			buf = append(buf, t.Name...)
+			buf = append(buf, " "...)
+		}
+		buf = append(buf, "\""...)
+		buf = append(buf, t.Path...)
+		buf = append(buf, "\"\n"...)
+		buf = append(buf, b[pkgidx[1]:]...)
+
+		b = buf
+
+	}
+
+	fullPath := path.Join(p.fullName, t.Filename)
+	return p.writeFile(fullPath, b, p.getFileModeOrDefault(fullPath, 0644))
+
+	// if lastImport != nil {
+	// 	// in this case b will be the existing file contents,
+
+	// 	// if it has an Rparen, it's a block and we insert at the end
+	// 	if lastImport.Rparen != nil {
+
+	// 	} else {
+	// 		// not a block, just add an import line after
+
+	// 	}
+
+	// } else {
+	// 	// no imports place after package line
+
+	// }
+
+	// // firstImport:
+	// // b := p.fileBytesOrNew(t.Filename)
+	// // _ = b
+
+}
+
+func (p *Package) fileBytesOrNew(fname string) []byte {
+
+	b := p.fileBytes[fname]
+	if b == nil { // might be a new file, which we start with just a package statement
+		b = []byte("package " + p.localName + "\n\n")
+	}
+	return b
 
 }
 
@@ -464,6 +626,33 @@ func (p *Package) load() error {
 	return nil
 }
 
+func (p *Package) getFileModeOrDefault(fpath string, defaultMode fs.FileMode) fs.FileMode {
+	{
+		f, err := p.outfs.Open(fpath)
+		if err != nil {
+			goto checkInfs
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return defaultMode
+		}
+		return st.Mode()
+	}
+checkInfs:
+	f, err := p.infs.Open(fpath)
+	if err != nil {
+		return defaultMode
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return defaultMode
+	}
+	return st.Mode()
+
+}
+
 // splitFuncDecl examines a FuncDecl and returns the type expression and name.
 func splitFuncDecl(f *ast.FuncDecl) (recvTypeExpr, funcName string) {
 
@@ -520,15 +709,15 @@ type FileWriter interface {
 // 	return fmt.Errorf("writeFile unsupported for filesystem type %t", fsys)
 // }
 
-func getFileModeOrDefault(fsys fs.FS, fpath string, defaultMode fs.FileMode) fs.FileMode {
-	f, err := fsys.Open(fpath)
-	if err != nil {
-		return defaultMode
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return defaultMode
-	}
-	return st.Mode()
-}
+// func getFileModeOrDefault(fsys fs.FS, fpath string, defaultMode fs.FileMode) fs.FileMode {
+// 	f, err := fsys.Open(fpath)
+// 	if err != nil {
+// 		return defaultMode
+// 	}
+// 	defer f.Close()
+// 	st, err := f.Stat()
+// 	if err != nil {
+// 		return defaultMode
+// 	}
+// 	return st.Mode()
+// }
