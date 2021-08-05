@@ -16,8 +16,8 @@ import (
 	"go/token"
 	"io/fs"
 	"io/ioutil"
-	"log"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -187,60 +187,60 @@ func (p *Package) LocalName() string {
 // 	return nil
 // }
 
-// CheckFuncExists returns true if the specified function/method exists in this package.
-// Use a period to specify a type and check for a method, e.g. "SomeType.SomeMethod".
-func (p *Package) CheckFuncExists(name string) (bool, error) {
-	if p.fset == nil {
-		return false, fmt.Errorf("package not Load()ed")
-	}
+// // CheckFuncExists returns true if the specified function/method exists in this package.
+// // Use a period to specify a type and check for a method, e.g. "SomeType.SomeMethod".
+// func (p *Package) CheckFuncExists(name string) (bool, error) {
+// 	if p.fset == nil {
+// 		return false, fmt.Errorf("package not Load()ed")
+// 	}
 
-	for _, af := range p.astf {
-		//af.Decls
-		log.Printf("af: %v", af)
-		log.Printf("af.Name.Name: %s", af.Name.Name)
-		for _, decl := range af.Decls {
-			log.Printf("decl: %#v", decl)
-			f, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			log.Printf("f.Name.Name: %s", f.Name.Name)
-		}
-	}
+// 	for _, af := range p.astf {
+// 		//af.Decls
+// 		log.Printf("af: %v", af)
+// 		log.Printf("af.Name.Name: %s", af.Name.Name)
+// 		for _, decl := range af.Decls {
+// 			log.Printf("decl: %#v", decl)
+// 			f, ok := decl.(*ast.FuncDecl)
+// 			if !ok {
+// 				continue
+// 			}
+// 			log.Printf("f.Name.Name: %s", f.Name.Name)
+// 		}
+// 	}
 
-	return false, nil
-}
+// 	return false, nil
+// }
 
-// WriteCodeBlock will emit into the specified file some Go source code.
-// The block of code must not include a package statement, but may include
-// import statements (which will be deduplicated and moved to the top).
-// Definitions contained in the source contents will cause the removal (replacement)
-// of existing definitions in the package unless replace is false.
-func (p *Package) WriteCodeBlock(filename, contents string, replace bool) error {
+// // WriteCodeBlock will emit into the specified file some Go source code.
+// // The block of code must not include a package statement, but may include
+// // import statements (which will be deduplicated and moved to the top).
+// // Definitions contained in the source contents will cause the removal (replacement)
+// // of existing definitions in the package unless replace is false.
+// func (p *Package) WriteCodeBlock(filename, contents string, replace bool) error {
 
-	// b, err := p.ReadFile(filename)
-	// if err != nil {
-	// 	// FIXME: we should create the file if it doesn't exist
-	// 	// TODO: figure out how local package name should be established
-	// 	return err
-	// }
-	// _ = b
+// 	// b, err := p.ReadFile(filename)
+// 	// if err != nil {
+// 	// 	// FIXME: we should create the file if it doesn't exist
+// 	// 	// TODO: figure out how local package name should be established
+// 	// 	return err
+// 	// }
+// 	// _ = b
 
-	// var fset token.FileSet
-	// pkgs, err := parser.ParseDir(&fset, "test1", nil, parser.ParseComments)
-	// if err != nil {
-	// 	return err
-	// }
-	// log.Printf("pkgs: %#v", pkgs)
+// 	// var fset token.FileSet
+// 	// pkgs, err := parser.ParseDir(&fset, "test1", nil, parser.ParseComments)
+// 	// if err != nil {
+// 	// 	return err
+// 	// }
+// 	// log.Printf("pkgs: %#v", pkgs)
 
-	// f, err := parser.ParseFile(&fset, filename, b, parser.ParseComments)
-	// if err != nil {
-	// 	return err
-	// }
-	// _ = f
+// 	// f, err := parser.ParseFile(&fset, filename, b, parser.ParseComments)
+// 	// if err != nil {
+// 	// 	return err
+// 	// }
+// 	// _ = f
 
-	return nil
-}
+// 	return nil
+// }
 
 // readFile will read a file from outfs if it exists there and if not from infs.
 // This way if the specified file has been modified you'll get the modified file,
@@ -344,17 +344,77 @@ func (p *Package) ApplyTransform(tr Transform) error {
 		return p.applyImport(t)
 
 	case *AddConstDeclTransform:
-		panic("TODO AddConstDeclTransform")
+		return p.applyAddConstDecl(t)
 
 	case *AddVarDeclTransform:
-		panic("TODO AddVarDeclTransform")
+		return p.applyAddVarDecl(t)
 
 	case *AddTypeDeclTransform:
-		panic("TODO AddTypeDeclTransform")
+		return p.applyAddTypeDecl(t)
+
+	case *GofmtTransform:
+		return p.applyGoFmt(t)
 
 	}
 
 	return fmt.Errorf("unknown transform type: %t", tr)
+}
+
+func (p *Package) applyGoFmt(t *GofmtTransform) error {
+
+	allNames := t.FilenameList == nil
+	var nameSet map[string]struct{}
+	if len(t.FilenameList) > 0 {
+		nameSet = make(map[string]struct{}, len(t.FilenameList))
+	}
+
+	for fn, b := range p.fileBytes {
+		fn, b := fn, b
+
+		// make sure we're supposed to format this file
+		if !allNames {
+			_, ok := nameSet[fn]
+			if !ok {
+				continue
+			}
+		}
+
+		// run gofmt and pipe input from b
+		cmd := exec.Command("gofmt")
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("gofmt command StdinPipe error: %w", err)
+		}
+		go func(b []byte) {
+			stdin.Write(b)
+			stdin.Close()
+		}(b)
+
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("gofmt command error: %w; full output: %s", err, out)
+		}
+
+		// check for minimum possible length, just as an added check to be sure we don't clobber the file here
+		if len(out) == len("package a") {
+			return fmt.Errorf("gofmt returned contents that are too short to valid: %s", out)
+		}
+
+		// do not write file if no change
+		if bytes.Equal(b, out) {
+			continue
+		}
+
+		// update bytes (map write with existing key should be safe during iterate)
+		p.fileBytes[fn] = out
+		err = p.writeFileNamed(fn, out)
+		if err != nil {
+			return fmt.Errorf("failed to write result of gofmt: %w", err)
+		}
+
+	}
+
+	return nil
 }
 
 func (p *Package) applyAddFuncDecl(t *AddFuncDeclTransform) error {
@@ -506,28 +566,110 @@ func (p *Package) applyImport(t *ImportTransform) error {
 
 	}
 
-	fullPath := path.Join(p.fullName, t.Filename)
-	return p.writeFile(fullPath, b, p.getFileModeOrDefault(fullPath, 0644))
+	return p.writeFileNamed(t.Filename, b)
+	// fullPath := path.Join(p.fullName, t.Filename)
+	// return p.writeFile(fullPath, b, p.getFileModeOrDefault(fullPath, 0644))
+}
 
-	// if lastImport != nil {
-	// 	// in this case b will be the existing file contents,
+func (p *Package) applyAddConstDecl(t *AddConstDeclTransform) error {
 
-	// 	// if it has an Rparen, it's a block and we insert at the end
-	// 	if lastImport.Rparen != nil {
+	// names must match or be a superset
 
-	// 	} else {
-	// 		// not a block, just add an import line after
+	// af := p.astf[t.Filename]
+	filename, names, varOrConstDecl := p.findVarOrConstDecl(token.CONST, t.NameList)
+	// log.Printf("filename=%q, names=%+v, varOrConstDecl=%#v", filename, names, varOrConstDecl)
+	//p.findVarOrConstDecl(tok token.Token, withAnyNames []string) (filename string, names []string, varOrConstDecl *ast.GenDecl)
 
-	// 	}
+	if varOrConstDecl != nil {
 
-	// } else {
-	// 	// no imports place after package line
+		// if a block exists that is not a subset, it's not clear what to do, so error
+		if !isStrSubset(names, t.NameList) {
+			return fmt.Errorf("name list from transform const block %+v is not a subset of existing block %+v", t.NameList, names)
+		}
 
-	// }
+		// if not replacing, then we're done
+		if !t.Replace {
+			return nil
+		}
 
-	// // firstImport:
-	// // b := p.fileBytesOrNew(t.Filename)
-	// // _ = b
+		// b := p.fileBytes[filename]
+		b := p.fileBytesWithoutBlock(filename, varOrConstDecl)
+		p.fileBytes[filename] = b
+		err := p.writeFileNamed(t.Filename, b)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	b := p.fileBytesOrNew(t.Filename)
+	b = append(b, t.Text...)
+	b = append(b, "\n"...)
+	return p.writeFileNamed(t.Filename, b)
+}
+
+func (p *Package) applyAddVarDecl(t *AddVarDeclTransform) error {
+
+	// names must match or be a superset
+
+	// af := p.astf[t.Filename]
+	filename, names, varOrConstDecl := p.findVarOrConstDecl(token.VAR, t.NameList)
+	// log.Printf("filename=%q, names=%+v, varOrConstDecl=%#v", filename, names, varOrConstDecl)
+	//p.findVarOrConstDecl(tok token.Token, withAnyNames []string) (filename string, names []string, varOrConstDecl *ast.GenDecl)
+
+	if varOrConstDecl != nil {
+
+		// if a block exists that is not a subset, it's not clear what to do, so error
+		if !isStrSubset(names, t.NameList) {
+			return fmt.Errorf("name list from transform var block %+v is not a subset of existing block %+v", t.NameList, names)
+		}
+
+		// if not replacing, then we're done
+		if !t.Replace {
+			return nil
+		}
+
+		// b := p.fileBytes[filename]
+		b := p.fileBytesWithoutBlock(filename, varOrConstDecl)
+		p.fileBytes[filename] = b
+		err := p.writeFileNamed(t.Filename, b)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	b := p.fileBytesOrNew(t.Filename)
+	b = append(b, t.Text...)
+	b = append(b, "\n"...)
+	return p.writeFileNamed(t.Filename, b)
+}
+
+func (p *Package) applyAddTypeDecl(t *AddTypeDeclTransform) error {
+
+	filename, typeDecl := p.findTypeDecl(t.Name)
+	// log.Printf("applyAddTypeDecl - filename=%q, typeDecl=%v", filename, typeDecl)
+
+	if typeDecl != nil {
+
+		// if not replacing, then we're done
+		if !t.Replace {
+			return nil
+		}
+
+		b := p.fileBytesWithoutBlock(filename, typeDecl)
+		p.fileBytes[filename] = b
+		err := p.writeFileNamed(t.Filename, b)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	b := p.fileBytesOrNew(t.Filename)
+	b = append(b, t.Text...)
+	b = append(b, "\n"...)
+	return p.writeFileNamed(t.Filename, b)
 
 }
 
@@ -539,6 +681,50 @@ func (p *Package) fileBytesOrNew(fname string) []byte {
 	}
 	return b
 
+}
+
+func (p *Package) fileBytesWithoutBlock(fname string, node ast.Node) []byte {
+
+	b := p.fileBytes[fname]
+	if b == nil {
+		return nil
+	}
+
+	// all nodes have a start and end
+	start := node.Pos()
+	end := node.End()
+
+	// but if there's a comment block, move to start of that
+	var cg *ast.CommentGroup
+	switch d := node.(type) {
+	case *ast.TypeSpec:
+		cg = d.Doc
+	case *ast.ValueSpec:
+		cg = d.Doc
+	case *ast.Field:
+		cg = d.Doc
+	case *ast.FuncDecl:
+		cg = d.Doc
+	case *ast.GenDecl:
+		cg = d.Doc
+	case *ast.ImportSpec:
+		cg = d.Doc
+	}
+
+	if cg != nil {
+		start = cg.Pos()
+	}
+
+	// convert to byte offset
+	startOffset := p.fset.Position(start).Offset
+	endOffset := p.fset.Position(end).Offset
+
+	out := make([]byte, 0, len(b))
+
+	out = append(out, b[:startOffset]...)
+	out = append(out, b[endOffset:]...)
+
+	return out
 }
 
 // findFunc looks through what has been load()ed and searches for a function
@@ -566,6 +752,95 @@ eachFile:
 	}
 
 	return
+}
+
+func (p *Package) findVarOrConstDecl(tok token.Token, withAnyNames []string) (filename string, names []string, varOrConstDecl *ast.GenDecl) {
+
+	nmap := make(map[string]struct{}, len(withAnyNames))
+	for _, n := range withAnyNames {
+		nmap[n] = struct{}{}
+	}
+
+	for fn, af := range p.astf {
+
+		for _, decl := range af.Decls {
+			// only genDecls
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			// with matching token
+			if genDecl.Tok != tok {
+				continue
+			}
+
+			names = names[:0]
+			foundMatch := false
+
+			for _, spec := range genDecl.Specs {
+				valueSpec, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, n := range valueSpec.Names {
+					names = append(names, n.Name)
+					if _, ok := nmap[n.Name]; ok {
+						foundMatch = true
+					}
+				}
+				// log.Printf("spec: %#v", spec)
+				// ast.ValueSec
+			}
+
+			if foundMatch {
+				filename = fn
+				varOrConstDecl = genDecl
+				return
+			}
+		}
+	}
+
+	return "", nil, nil
+}
+
+func (p *Package) findTypeDecl(withName string) (filename string, typeDecl *ast.GenDecl) {
+
+	for fn, af := range p.astf {
+		_ = fn
+
+		for _, decl := range af.Decls {
+			// only genDecls
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			// with `type` token
+			if genDecl.Tok != token.TYPE {
+				continue
+			}
+
+			// sanity check
+			if len(genDecl.Specs) != 1 {
+				continue
+			}
+
+			// should contain a TypeSpec
+			typeSpec, ok := genDecl.Specs[0].(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+
+			// from which we can extract and check the name
+			if typeSpec.Name.Name != withName {
+				continue
+			}
+
+			return fn, genDecl
+
+		}
+	}
+
+	return "", nil
 }
 
 // load will read in the package files and parse everything.
@@ -721,3 +996,26 @@ type FileWriter interface {
 // 	}
 // 	return st.Mode()
 // }
+
+// isStrSubset checks if s1 ⊆ s2
+// (returns true if all elements of s1 are in s2)
+func isStrSubset(s1, s2 []string) bool {
+
+	if len(s2) < len(s1) {
+		return false
+	}
+
+	for _, v1 := range s1 {
+		found := false
+		for _, v2 := range s2 {
+			if v1 == v2 {
+				found = true
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}

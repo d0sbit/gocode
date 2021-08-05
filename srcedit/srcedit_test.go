@@ -63,22 +63,22 @@ func TestFindOSWdModuleDir(t *testing.T) {
 
 }
 
-func TestWriteCodeBlock(t *testing.T) {
-	tfs := memfs.New()
-	// TODO: move this to go:embed
-	must(t, tfs.MkdirAll("test1", 0777))
-	must(t, tfs.WriteFile("test1/test1.go", []byte("package test1\n\nfunc ExampleFunc() {}\n"), 0777))
-	// must(t, tfs.WriteFile("test1/test1.go", []byte("abcd"), 0777))
+// func TestWriteCodeBlock(t *testing.T) {
+// 	tfs := memfs.New()
+// 	// TODO: move this to go:embed
+// 	must(t, tfs.MkdirAll("test1", 0777))
+// 	must(t, tfs.WriteFile("test1/test1.go", []byte("package test1\n\nfunc ExampleFunc() {}\n"), 0777))
+// 	// must(t, tfs.WriteFile("test1/test1.go", []byte("abcd"), 0777))
 
-	p := NewPackage(tfs, tfs, "test1")
+// 	p := NewPackage(tfs, tfs, "test1")
 
-	must(t, p.WriteCodeBlock("test1/test1.go", "import \"log\"\nfunc ExampleFunc() { log.Printf(`ExampleFunc here`)}\n", true))
-	// must(t, p.WriteCodeBlock("test1/test1.go", "abcd", true))
+// 	must(t, p.WriteCodeBlock("test1/test1.go", "import \"log\"\nfunc ExampleFunc() { log.Printf(`ExampleFunc here`)}\n", true))
+// 	// must(t, p.WriteCodeBlock("test1/test1.go", "abcd", true))
 
-	// ok, err := p.CheckFuncExists("ExampleFunc")
-	// must(t, err)
-	// t.Logf("result: %v", ok)
-}
+// 	// ok, err := p.CheckFuncExists("ExampleFunc")
+// 	// must(t, err)
+// 	// t.Logf("result: %v", ok)
+// }
 
 func TestApplyTransforms(t *testing.T) {
 
@@ -180,6 +180,157 @@ func TestApplyTransforms(t *testing.T) {
 			eout: files{
 				"a.go": `package test1` + lf + lf +
 					`import "io/ioutil"` + lf + lf + lf,
+			},
+		},
+
+		{
+			name:    "const01",
+			pkgPath: "test1",
+			in:      files{},
+			transforms: []Transform{
+				&AddConstDeclTransform{
+					Filename: "a.go",
+					NameList: []string{"x", "y"},
+					Text: `const (` + lf +
+						tab + `x = 10` + lf +
+						tab + `y = 20` + lf +
+						`)` + lf,
+					Replace: true,
+				},
+			},
+			eout: files{
+				"a.go": `package test1` + lf + lf +
+					`const (` + lf +
+					tab + `x = 10` + lf +
+					tab + `y = 20` + lf +
+					`)` + lf + lf,
+			},
+		},
+
+		{
+			name:    "const02",
+			pkgPath: "test1",
+			in: files{
+				"a.go": `package test1` + lf + lf +
+					`const (` + lf +
+					tab + `x = 1` + lf +
+					tab + `y = 2` + lf +
+					`)` + lf,
+			},
+			transforms: []Transform{
+				&AddConstDeclTransform{
+					Filename: "a.go",
+					NameList: []string{"x", "y"},
+					Text: `const (` + lf +
+						tab + `x = 10` + lf +
+						tab + `y = 20` + lf +
+						`)` + lf,
+					Replace: true,
+				},
+			},
+			eout: files{
+				"a.go": `package test1` + lf + lf + lf +
+					`const (` + lf +
+					tab + `x = 10` + lf +
+					tab + `y = 20` + lf +
+					`)` + lf + lf,
+			},
+		},
+
+		{
+			name:    "var01",
+			pkgPath: "test1",
+			in:      files{},
+			transforms: []Transform{
+				&AddVarDeclTransform{
+					Filename: "a.go",
+					NameList: []string{"x", "y"},
+					Text: `var (` + lf +
+						tab + `x = 10` + lf +
+						tab + `y = 20` + lf +
+						`)` + lf,
+					Replace: true,
+				},
+			},
+			eout: files{
+				"a.go": `package test1` + lf + lf +
+					`var (` + lf +
+					tab + `x = 10` + lf +
+					tab + `y = 20` + lf +
+					`)` + lf + lf,
+			},
+		},
+
+		{
+			name:    "type01",
+			pkgPath: "test1",
+			in:      files{},
+			transforms: []Transform{
+				&AddTypeDeclTransform{
+					Filename: "a.go",
+					Name:     "X",
+					Text:     `type X struct {}` + lf,
+					Replace:  true,
+				},
+			},
+			eout: files{
+				"a.go": `package test1` + lf + lf +
+					`type X struct {}` + lf + lf,
+			},
+		},
+
+		{
+			name:    "type02",
+			pkgPath: "test1",
+			in: files{
+				"a.go": `package test1` + lf + lf +
+					`type X struct {}` + lf,
+			},
+			transforms: []Transform{
+				&AddTypeDeclTransform{
+					Filename: "a.go",
+					Name:     "X",
+					Text:     `type X int` + lf,
+					Replace:  true,
+				},
+			},
+			eout: files{
+				"a.go": `package test1` + lf + lf + lf +
+					`type X int` + lf + lf,
+			},
+		},
+
+		{
+			name:    "type03",
+			pkgPath: "test1",
+			in: files{
+				"a.go": `package test1` + lf + lf +
+					`type X struct {}` + lf,
+			},
+			transforms: []Transform{
+				&AddTypeDeclTransform{
+					Filename: "a.go",
+					Name:     "X",
+					Text:     `type X int` + lf,
+					Replace:  false,
+				},
+			},
+			eout: files{}, // no changed files
+		},
+
+		{
+			name:    "gofmt01",
+			pkgPath: "test1",
+			in: files{
+				"a.go": `package test1` + lf + lf +
+					`type X struct  {   }` + lf,
+			},
+			transforms: []Transform{
+				&GofmtTransform{},
+			},
+			eout: files{
+				"a.go": `package test1` + lf + lf +
+					`type X struct{}` + lf,
 			},
 		},
 	}

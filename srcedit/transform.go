@@ -66,6 +66,13 @@ type AddTypeDeclTransform struct {
 
 func (t *AddTypeDeclTransform) xform() {}
 
+// GofmtTransform runs "gofmt" on the indicate files or all.
+type GofmtTransform struct {
+	FilenameList []string // format these files, ignore if missing, nil means all
+}
+
+func (t *GofmtTransform) xform() {}
+
 // TODO: AddFuncLineTransform { FuncName, Line } adds a line to a function before the return - we'll need it for adding routes
 
 // Transformers houses a collection of transforms.  More than meets the eye, robots in disguise.
