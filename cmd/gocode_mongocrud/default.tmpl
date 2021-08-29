@@ -1,0 +1,114 @@
+{{define "Store"}}
+import "go.mongodb.org/mongo-driver/mongo"
+
+// Store has overall connection information shared by each specific type's store.
+type Store struct {
+	client *mongo.Client // mongo client
+	dbName string // default mongo database name
+}
+{{end}}
+
+{{define "StoreMethods"}}
+import "errors"
+import "go.mongodb.org/mongo-driver/mongo"
+
+// NewStore returns an initialized Store instance.
+func NewStore(client *mongo.Client, dbName string) (*Store, error) {
+	if dbName == "" {
+		return nil, errors.New("dbName is required")
+	}
+	ret := Store {
+		client: client, 
+		dbName: dbName,
+	}
+	return &ret, nil
+}
+
+func (s *Store) db() *mongo.Database {
+	return s.client.Database(s.dbName)
+}
+
+{{end}}
+
+{{define "TestStore"}}
+import "testing"
+
+/*
+// TestMain starts a shared mongodb docker container for the rest of the tests in this package to use.
+func TestMain(m *testing.M) {
+
+	tm, err := startMongo(nil)
+	if err != nil {
+		panic(err)
+	}
+	defer tm.Close()
+	testMongoURI = tm.URI
+
+	m.Run()
+	// don't call os.Exit here because we want the defer to run
+	return
+}
+
+var testMongoURI string
+
+type tmongo struct {
+	URI string
+}
+
+func (tm *tmongo) Close() error {
+	return nil
+}
+
+func startMongo(t *testing.T) (*tmongo, error) {
+	if t != nil {
+		t.Helper()
+	}
+	
+}
+*/
+{{end}}
+
+{{define "TYPEStore"}}
+// {{$.Struct.LocalName}}Store has mongodb storage methods for this type.
+type {{$.Struct.LocalName}}Store struct {
+	*Store // embed store for easy access
+}
+{{end}}
+
+{{define "TYPEStoreMethods"}}
+import "go.mongodb.org/mongo-driver/mongo"
+import "go.mongodb.org/mongo-driver/mongo/options"
+
+// {{$.Struct.LocalName}} returns a {{$.Struct.LocalName}}Store for accessing this type.
+func (s *Store) {{$.Struct.LocalName}}() *{{$.Struct.LocalName}}Store {
+	return &{{$.Struct.LocalName}}Store{Store:s}
+}
+
+// col returns the collection for this type with any options
+func (s *Store) col(opts ...*options.CollectionOptions) *mongo.Collection {
+	return s.db().Collection("{{$.Struct.LocalName}}", opts...)
+}
+{{end}}
+
+{{define "TYPESelectByID"}}
+import "context"
+import "go.mongodb.org/mongo-driver/bson"
+
+// SelectByID returns the matching record by primary key.
+func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) (*{{$.Struct.QName}}, error) {
+	var ret {{$.Struct.QName}}
+	err := s.col().FindOne(ctx, bson.D{ {{range $.Struct.FieldList.PK}}
+		{"{{.BSONName}}", v{{.GoName}}},
+	{{end}}
+    }).Decode(&ret)
+	return &ret, err
+}
+{{end}}
+
+{{define "TestTYPESelectByID"}}
+import "testing"
+
+func Test{{$.Struct.LocalName}}SelectByID(t *testing.T) {
+	t.Fatal("TODO")
+}
+{{end}}

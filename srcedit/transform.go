@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/scanner"
 	"go/token"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -24,6 +25,13 @@ type ImportTransform struct {
 }
 
 func (t *ImportTransform) xform() {}
+
+// DedupImportsTransform ensures only one of each import.
+type DedupImportsTransform struct {
+	FilenameList []string // dedup imports in these files, ignore if missing, nil means all
+}
+
+func (t *DedupImportsTransform) xform() {}
 
 // AddFuncDeclTransform is used to add a function or method.
 type AddFuncDeclTransform struct {
@@ -134,7 +142,10 @@ func ParseTransforms(filename, snippet string) (ret []Transform, reterr error) {
 	mkText := func(code, doc ast.Node) string {
 		tcode := sliceSnippet(code.Pos(), code.End())
 		var tdoc string
-		if doc != nil {
+		// need reflect to check for nil ptr
+		if doc != nil && !reflect.ValueOf(doc).IsNil() {
+			// log.Printf("sliceSnippet = %p", sliceSnippet)
+			// log.Printf("doc = %#v", doc)
 			tdoc = sliceSnippet(doc.Pos(), doc.End())
 		}
 		var sb strings.Builder

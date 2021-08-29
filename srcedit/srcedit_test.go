@@ -28,12 +28,12 @@ func TestOSWorkingFSDir(t *testing.T) {
 
 func TestFindOSWdModuleDir(t *testing.T) {
 
-	fsys, modDir, err := FindOSWdModuleDir()
+	fsys, modDir, modPath, err := FindOSWdModuleDir()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Logf("fsys=%v, modDir=%s", fsys, modDir)
+	t.Logf("fsys=%v, modDir=%s, modPath=%s", fsys, modDir, modPath)
 
 	modFS, err := fs.Sub(fsys, modDir)
 	if err != nil {
@@ -86,7 +86,7 @@ func TestApplyTransforms(t *testing.T) {
 
 	type tcase struct {
 		name       string      // test name
-		pkgPath    string      // package path/dir
+		subDir     string      // subdir of where code lives in the fs
 		in         files       // input files
 		transforms []Transform // transforms to apply
 		eout       files       // expected output
@@ -95,8 +95,8 @@ func TestApplyTransforms(t *testing.T) {
 	tcaseList := []tcase{
 
 		{
-			name:    "func01",
-			pkgPath: "test1",
+			name:   "func01",
+			subDir: "test1",
 			in: files{
 				"a.go": `package test1` + lf +
 					`func A() error { return nil }` + lf,
@@ -117,8 +117,8 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "import01",
-			pkgPath: "test1",
+			name:   "import01",
+			subDir: "test1",
 			in: files{
 				"a.go": `package test1` + lf + lf +
 					`import (` + lf +
@@ -144,8 +144,8 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "import02",
-			pkgPath: "test1",
+			name:   "import02",
+			subDir: "test1",
 			in: files{
 				"a.go": `package test1` + lf + lf +
 					`import "io"` + lf + lf,
@@ -165,9 +165,9 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "import03",
-			pkgPath: "test1",
-			in:      files{
+			name:   "import03",
+			subDir: "test1",
+			in:     files{
 				// no input files
 			},
 			transforms: []Transform{
@@ -184,9 +184,40 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "const01",
-			pkgPath: "test1",
-			in:      files{},
+			name:   "dedupimport01",
+			subDir: "test1",
+			in: files{
+				"a.go": `package test1` + lf + lf +
+					`import "io"` + lf +
+					`import "io"` + lf +
+					`import (` + lf +
+					`"io"` + lf +
+					`)` + lf +
+					`import (` + lf +
+					`"io"` + lf +
+					`"os"` + lf +
+					`)` + lf +
+					lf,
+			},
+			transforms: []Transform{
+				&DedupImportsTransform{
+					FilenameList: []string{"a.go"},
+				},
+			},
+			eout: files{
+				"a.go": `package test1` + lf + lf +
+					`import "io"` + lf + lf + lf +
+					`import (` + lf + lf +
+					`"os"` + lf +
+					`)` + lf +
+					lf,
+			},
+		},
+
+		{
+			name:   "const01",
+			subDir: "test1",
+			in:     files{},
 			transforms: []Transform{
 				&AddConstDeclTransform{
 					Filename: "a.go",
@@ -208,8 +239,8 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "const02",
-			pkgPath: "test1",
+			name:   "const02",
+			subDir: "test1",
 			in: files{
 				"a.go": `package test1` + lf + lf +
 					`const (` + lf +
@@ -238,9 +269,9 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "var01",
-			pkgPath: "test1",
-			in:      files{},
+			name:   "var01",
+			subDir: "test1",
+			in:     files{},
 			transforms: []Transform{
 				&AddVarDeclTransform{
 					Filename: "a.go",
@@ -262,9 +293,9 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "type01",
-			pkgPath: "test1",
-			in:      files{},
+			name:   "type01",
+			subDir: "test1",
+			in:     files{},
 			transforms: []Transform{
 				&AddTypeDeclTransform{
 					Filename: "a.go",
@@ -280,8 +311,8 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "type02",
-			pkgPath: "test1",
+			name:   "type02",
+			subDir: "test1",
 			in: files{
 				"a.go": `package test1` + lf + lf +
 					`type X struct {}` + lf,
@@ -301,8 +332,8 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "type03",
-			pkgPath: "test1",
+			name:   "type03",
+			subDir: "test1",
 			in: files{
 				"a.go": `package test1` + lf + lf +
 					`type X struct {}` + lf,
@@ -319,8 +350,8 @@ func TestApplyTransforms(t *testing.T) {
 		},
 
 		{
-			name:    "gofmt01",
-			pkgPath: "test1",
+			name:   "gofmt01",
+			subDir: "test1",
 			in: files{
 				"a.go": `package test1` + lf + lf +
 					`type X struct  {   }` + lf,
@@ -342,19 +373,19 @@ func TestApplyTransforms(t *testing.T) {
 			infs := memfs.New()  // gets loaded with tc.in
 			outfs := memfs.New() // output written here so it can be compared to tc.eout
 
-			must(t, infs.MkdirAll(tc.pkgPath, 0755))
+			must(t, infs.MkdirAll(tc.subDir, 0755))
 			for fname, contents := range tc.in {
-				must(t, infs.WriteFile(path.Join(tc.pkgPath, fname), []byte(contents), 0644))
+				must(t, infs.WriteFile(path.Join(tc.subDir, fname), []byte(contents), 0644))
 			}
 
-			must(t, outfs.MkdirAll(tc.pkgPath, 0755))
+			must(t, outfs.MkdirAll(tc.subDir, 0755))
 
 			// create Package and apply Transforms
-			p := NewPackage(infs, outfs, tc.pkgPath)
+			p := NewPackage(infs, outfs, "testcase", tc.subDir)
 			must(t, p.ApplyTransforms(tc.transforms...))
 
 			// walk the output fs, skip dirs, compare each file, then remove from eout map
-			must(t, fs.WalkDir(outfs, tc.pkgPath, fs.WalkDirFunc(func(fpath string, dirEntry fs.DirEntry, err error) error {
+			must(t, fs.WalkDir(outfs, tc.subDir, fs.WalkDirFunc(func(fpath string, dirEntry fs.DirEntry, err error) error {
 				// t.Logf("checking fpath %q", fpath)
 				if err != nil {
 					return fmt.Errorf("error from WalkDirFunc (fpath=%q): %w", fpath, err)

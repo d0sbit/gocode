@@ -23,7 +23,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"golang.org/x/mod/modfile"
 )
+
+// ErrNotFound is returned in some cases where an explicity "not found" result is needed.
+var ErrNotFound = errors.New("not found")
 
 var identRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]*$`)
 
@@ -47,20 +52,38 @@ func OSWorkingFSDir() (fs.FS, string, error) {
 }
 
 // FindOSWdModuleDir calls OSWorkingFSDir to split up the working dir into a root and path,
-// and then calls FindModuleDir.
-func FindOSWdModuleDir() (fs.FS, string, error) {
+// and then calls FindModuleDir and extracts the module path from go.mod.
+// For example, on Linux the return might be ("/", "home/joe/projects/examplepjt", "github.com/d0sbit/example", nil),
+// or on Windows ("C:\", "user/joe/projects/examplepjt", "github.com/d0sbit/example", nil).
+func FindOSWdModuleDir() (rootFS fs.FS, moduleDir, modulePath string, err error) {
 
 	fsys, dir, err := OSWorkingFSDir()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 
 	modDir, err := FindModuleDir(fsys, dir)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 
-	return fsys, modDir, nil
+	modf, err := fsys.Open(path.Join(modDir, "go.mod"))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to open go.mod: %w", err)
+	}
+	defer modf.Close()
+	b, err := ioutil.ReadAll(modf)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to read go.mod: %w", err)
+	}
+
+	modFile, err := modfile.ParseLax("go.mod", b, nil)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to parse go.mod: %w", err)
+	}
+	modulePath = modFile.Module.Mod.Path
+
+	return fsys, modDir, modulePath, nil
 }
 
 // FindModuleFS will start at startDir and look for a go.mod file
@@ -100,10 +123,11 @@ func FindModuleDir(fsys fs.FS, startDir string) (string, error) {
 
 // Package provides methods to perform code edits on a package.
 type Package struct {
-	infs      fs.FS  // read files from
-	outfs     fs.FS  // write updated files to
-	fullName  string // full package name, import path
-	localName string // local name from package statements or default
+	infs       fs.FS  // read files from
+	outfs      fs.FS  // write updated files to
+	modulePath string // the module name from the `module` statement in go.mod
+	subDir     string // subdirectory inside infs and outfs of where the code for this package lives
+	localName  string // local name from package statements or default
 
 	fset      *token.FileSet       // Go parser needs this
 	astf      map[string]*ast.File // each file that was parsed in the package with the filename (no path info) as the key
@@ -111,18 +135,38 @@ type Package struct {
 }
 
 // NewPackage returns a new Package with the specified input and output filesystems and the specified module name/path.
-func NewPackage(infs, outfs fs.FS, fullName string) *Package {
-	// FIXME: do we need to remove the "v2" from the name?
+func NewPackage(infs, outfs fs.FS, modulePath, subDir string) *Package {
+
+	// TODO: stuff below has been handled - move this explalnation somewhere else
+
+	// FIXME: fullName is not really clear here, and I don't think we even use it right now.
+	// Are we expecting the caller to read go.mod and prepend whatever is in the `module` directive here?
+	// Probably not, in which case this fullName is not a full name at all but a subdirectory to where
+	// the package code lives within the module.  That should be made very clear.
+	// Also we need to figure out what to do with the case where the package path is "." and the FS
+	// is rooted at the module dir.
+	// Probably having FindOSWdModuleDir read the go.mod and extract the module prefix would be a decent way to go,
+	// so we get back the root filesystem ("C:\" or "/""), the subdir to the go.mod ("/home/joe/git/somepjt"),
+	// the logical module prefix ("github.com/joe/somepjt"), and the subdir under that ("." or "internal/mstore" or whatever).
+	// FIXME: do we need to remove the "v2" from the name?  So far this hasn't come up because we don't deal with
+	// emitting import paths to files, but are just using them to read and manipulate source, without understanding
+	// versions or even how the imports relate to each other.
 	return &Package{
-		infs:     infs,
-		outfs:    outfs,
-		fullName: fullName,
+		infs:       infs,
+		outfs:      outfs,
+		modulePath: modulePath,
+		subDir:     subDir,
 	}
 }
 
-// FullName returns the full package path, e.g. "a/b/c"
-func (p *Package) FullName() string {
-	return p.fullName
+// SubDir returns the subdirectory in which the code lives - "" means it lives directly in the root of the filesystem(s).
+func (p *Package) SubDir() string {
+	return p.subDir
+}
+
+// ModuleName returns the name of the module (from the `module` line in go.mod).
+func (p *Package) ModuleName() string {
+	return p.modulePath
 }
 
 // LocalName returns the name from the package statements inside the source files.
@@ -136,7 +180,7 @@ func (p *Package) LocalName() string {
 // otherwise the original unmodified one.  The filename should not have any path
 // separators in it.
 func (p *Package) readFile(filename string) ([]byte, error) {
-	openPath := path.Join(p.fullName, filename)
+	openPath := path.Join(p.subDir, filename)
 	f, err := p.outfs.Open(openPath)
 	if err != nil {
 		f, err := p.infs.Open(openPath)
@@ -156,7 +200,7 @@ func (p *Package) fileNames() ([]string, error) {
 
 	retMap := make(map[string]struct{}, 8)
 
-	dirEntryList, err := fs.ReadDir(p.outfs, p.fullName)
+	dirEntryList, err := fs.ReadDir(p.outfs, p.subDir)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +208,7 @@ func (p *Package) fileNames() ([]string, error) {
 		retMap[de.Name()] = struct{}{}
 	}
 
-	dirEntryList, err = fs.ReadDir(p.infs, p.fullName)
+	dirEntryList, err = fs.ReadDir(p.infs, p.subDir)
 	if err != nil {
 		return nil, err
 	}
@@ -197,13 +241,15 @@ func (p *Package) writeFileNamed(name string, data []byte) error {
 	if dir != "" {
 		return fmt.Errorf("name %q appears to have a directory, cannot be used with writeFileNamed", name)
 	}
-	return p.writeFile(path.Join(p.fullName, name), data, p.getFileModeOrDefault(name, 0644))
+	return p.writeFile(path.Join(p.subDir, name), data, p.getFileModeOrDefault(name, 0644))
 }
 
 // ApplyTransforms calls ApplyTransform for each one provided.  Note that transforms
 // are not atomic and this may result in only a subset of the requested changes being applied
 // upon error.  Consider using a separate output filesystem if you're concerned about this.
 func (p *Package) ApplyTransforms(tr ...Transform) error {
+
+	// log.Printf("ApplyTransforms, tr: %#v", tr)
 
 	for _, t := range tr {
 		err := p.ApplyTransform(t)
@@ -229,6 +275,9 @@ func (p *Package) ApplyTransform(tr Transform) error {
 	case *AddFuncDeclTransform:
 		return p.applyAddFuncDecl(t)
 
+	case *DedupImportsTransform:
+		return p.applyDedupImports(t)
+
 	case *ImportTransform:
 		return p.applyImport(t)
 
@@ -251,10 +300,16 @@ func (p *Package) ApplyTransform(tr Transform) error {
 
 func (p *Package) applyGoFmt(t *GofmtTransform) error {
 
+	// log.Printf("applyGoFmt: %#v", t)
+
 	allNames := t.FilenameList == nil
 	var nameSet map[string]struct{}
 	if len(t.FilenameList) > 0 {
 		nameSet = make(map[string]struct{}, len(t.FilenameList))
+	}
+
+	for _, fn := range t.FilenameList {
+		nameSet[fn] = struct{}{}
 	}
 
 	for fn, b := range p.fileBytes {
@@ -332,7 +387,7 @@ func (p *Package) applyAddFuncDecl(t *AddFuncDeclTransform) error {
 			b = append(b[:startOffset], b[endOffset:]...)
 			p.fileBytes[existingFilename] = b
 
-			// existingFilePath := path.Join(p.fullName, existingFilename)
+			// existingFilePath := path.Join(p.subDir, existingFilename)
 			err := p.writeFileNamed(existingFilename, b)
 			if err != nil {
 				return err
@@ -456,7 +511,7 @@ func (p *Package) applyImport(t *ImportTransform) error {
 	}
 
 	return p.writeFileNamed(t.Filename, b)
-	// fullPath := path.Join(p.fullName, t.Filename)
+	// fullPath := path.Join(p.subDir, t.Filename)
 	// return p.writeFile(fullPath, b, p.getFileModeOrDefault(fullPath, 0644))
 }
 
@@ -692,6 +747,27 @@ func (p *Package) findVarOrConstDecl(tok token.Token, withAnyNames []string) (fi
 	return "", nil, nil
 }
 
+// FindType returns information about a type in the package.
+// This causes the package to be (re)loaded/parsed into memory.
+// If the type cannot be found then ErrNotFound is returned in err.
+func (p *Package) FindType(withName string) (ret *TypeInfo, err error) {
+	err = p.load()
+	if err != nil {
+		return
+	}
+	filename, typeDecl := p.findTypeDecl(withName)
+	if typeDecl == nil {
+		err = ErrNotFound
+	}
+	ret = &TypeInfo{
+		GenDecl:   typeDecl,
+		FileSet:   p.fset,
+		Filename:  filename,
+		FileBytes: p.fileBytes[filename],
+	}
+	return
+}
+
 func (p *Package) findTypeDecl(withName string) (filename string, typeDecl *ast.GenDecl) {
 
 	for fn, af := range p.astf {
@@ -746,6 +822,7 @@ func (p *Package) load() error {
 	p.localName = ""
 
 	pkgNames := make([]string, 0, 1)
+	pkgNameMap := make(map[string]struct{}, 2)
 	for _, fn := range fnl {
 		b, err := p.readFile(fn)
 		if err != nil {
@@ -756,8 +833,13 @@ func (p *Package) load() error {
 		if err != nil {
 			return err
 		}
-		pkgNames = append(pkgNames, af.Name.Name)
 		p.astf[fn] = af
+		pname := af.Name.Name
+		_, ok := pkgNameMap[pname]
+		if !ok {
+			pkgNames = append(pkgNames, pname)
+			pkgNameMap[pname] = struct{}{}
+		}
 		// NOTE: ParseDir returns an ast.Package but it doesn't have any additional info,
 		// a simple slice of *ast.File is just as well (plus we need the separate filesystem support)
 		// NOTE: if we need SSA we'll just call sslutil.BuildPackage somewhere around here
@@ -765,10 +847,17 @@ func (p *Package) load() error {
 
 	switch len(pkgNames) {
 	case 0:
-		// derive from full package name
-		_, n := path.Split(p.fullName)
+		// derive from subdir
+		_, n := path.Split(p.subDir)
 		n = strings.NewReplacer("-", "").Replace(n)
 		p.localName = n
+
+		// but if no subdir then look at last element of modulePath
+		if p.localName == "" || p.localName == "." {
+			_, n := path.Split(p.modulePath)
+			p.localName = n
+		}
+
 	case 1:
 		p.localName = pkgNames[0]
 	default:

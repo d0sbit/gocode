@@ -16,7 +16,18 @@ put something here about making sure ~/go/bin is in your PATH, and instructions 
 
 ## Usage
 
-TODO
+### Primary Keys
+
+While GoCode tries to infer as much information as possible without requiring explicit configuration,
+the case of composite primary keys (more than one field acting as the unique identifier for a database record)
+needs explicit configuration.  GoCode will identify primary keys (single fields or composite) using the following rules,
+checked in sequence:
+
+- If one or more fields have struct tags with `gocode:"pk"`, then those fields together form the composite primary key (or it is also okay if just one field tagged like this)
+- If a field is named after the struct and followed by ID (e.g. type Xyz struct { XyzID string } ) it is chosen as the PK.
+- If a field is named "ID" it is chosen as the PK.
+
+Note that GoCode tries to avoid emitting field names where it can be avoided, for easier maintenance (instead reads them at runtime via reflect). But this may not be possible with primary keys, meaning if you change the primary key for a type you may need to regenerate or update methods emitted by GoCode by hand.
 
 ## How it Works
 
@@ -26,6 +37,21 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 
 <!--
 ## Notes
+
+TODO:
+* Get main test output building - DONE
+  - debug gofmt DONE
+  - add output for AStore if it doesn't exist DONE
+  - add output for Store if it doesn't exists DONE
+* Write import deduplicator (useful as it's own thing separate from the add import transform) DONE
+* Make test case have a method that lights up a mongodb docker container and runs the whole thing
+* Implement -dry-run
+* Add remaining methods to get full CRUD
+* Make a punchlist of what is left to round off mongdob
+* Then move onto sql version (decide which library to use - sqlx is a decent choice)
+  - with mysql docker test case
+
+---
 
 * we should add Vugu UI generation!
 
