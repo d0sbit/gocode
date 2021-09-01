@@ -10,7 +10,12 @@ type Store struct {
 
 {{define "StoreMethods"}}
 import "errors"
+import "reflect"
+import "strings"
+import "fmt"
 import "go.mongodb.org/mongo-driver/mongo"
+import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/bson/primitive"
 
 // NewStore returns an initialized Store instance.
 func NewStore(client *mongo.Client, dbName string) (*Store, error) {
@@ -28,47 +33,335 @@ func (s *Store) db() *mongo.Database {
 	return s.client.Database(s.dbName)
 }
 
+// ErrNotFound provides an explicit type for the not found case,
+// intended to wrap database-specific error(s).
+type ErrNotFound struct {
+	Err error
+}
+
+// Error implements the error interface.
+func (e *ErrNotFound) Error() string {
+	if e.Err == nil {
+		return "not found"
+	}
+	return "not found: " + e.Err.Error()
+}
+
+// Unwrap supports error wrapping.
+func (e *ErrNotFound) Unwrap() error { return e.Err }
+
+// Is returns true if the specified error is also a *ErrNotFound
+func (e *ErrNotFound) Is(err error) bool {
+	_, ok := err.(*ErrNotFound)
+	return ok
+}
+
+// HTTPStatusCode tells HTTP handler methods that 404 is the status corresponding to this error.
+// Individual handlers can decide to honor this and send back in response or not.
+func (e *ErrNotFound) HTTPStatusCode() int {
+	return 404
+}
+
+func derefedType(o interface{}) reflect.Type {
+	tv := reflect.ValueOf(o)
+	for tv.Kind() == reflect.Ptr {
+		tv = tv.Elem()
+	}
+	return tv.Type()
+}
+
+// isValidMongoOp returns true if the string is one of the operators we allow when querying
+func isValidMongoOp(v string) bool {
+	switch v {
+	case "$eq", "$gt", "$gte", "$lt", "$lte", "$in", "$ne", "$nin", // usual binary operators
+		"$and", "$not", "$nor", "$or", // boolean
+		"$mod", "$exists", "$type", "$all", "$size": // other
+		return true
+	}
+	return false
+}
+
+// isBSONField returns true if there is a bson struct tag with the name v in type t.
+// t must correspond to a struct type
+func isBSONField(t reflect.Type, v string) bool {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		bsonName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
+		if bsonName == "" || bsonName == "-" {
+			continue
+		}
+		if bsonName == v {
+			return true
+		}
+	}
+	return false
+}
+
+// mongoSort returns a bson.D appropriate for a mongo query given the specified input.
+// sort indicates the sorting and o is the object to check for fields on.
+// The sort can either be a slice of strings, or a slice of map[string]interface{},
+// with the values being either 1 or -1 (float64 or int underlying type).
+// Note that each map must only contain a single entry - this is due to the fact that
+// maps in Go do not have an explicit order.
+// Any other input varation will error.
+func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
+
+	typo := derefedType(o)
+
+	for _, v := range sort {
+		switch vt := v.(type) {
+		case string: // string by itself means sort ascending
+			if !isBSONField(typo, vt) {
+				return nil, fmt.Errorf("invalid field name %q", v)
+			}
+			ret = append(ret, primitive.E{Key:vt, Value:1})
+		case map[string]interface{}:
+			if len(vt) != 1 {
+				return nil, fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(vt))
+			}
+			for k, n := range vt {
+				if !isBSONField(typo, k) {
+					return nil, fmt.Errorf("invalid field name %q", k)
+				}
+				ns := fmt.Sprint(n)
+				switch ns {
+				case "1":
+					ret = append(ret, primitive.E{Key:k, Value:1})
+				case "-1":
+					ret = append(ret, primitive.E{Key:k, Value:-1})
+				default:
+					return nil, fmt.Errorf("invalid sort order %q for field %q", ns, k)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("unknown type %T found in sort order", v)
+		}
+	}
+
+	return ret, nil
+}
+
+// mongoFilter returns a value appropriate for a mongo query given the specified input.
+// The filter should be map[string]interface{} with values of either map[string]interface{},
+// []interface{} or other appropriate primitives (JSON deserialized to a map works).
+// If a map[string]interface{} is passed in as filter, then any non-nil return value is guaranteed
+// to be of type bson.D.
+// isValidMongoOp and isBSONField are used to verify map keys and thus avoid allowing
+// unintended functionality.
+// o is the object to check for fields against.
+func mongoFilter(filter interface{}, o interface{}) (ret interface{}, err error) {
+
+	typo := derefedType(o)
+
+	switch vf := filter.(type) {
+		case float64, float32, int, int32, int64, string:
+			return vf, nil // these are returned as-is
+		case []interface{}:
+			r := make(bson.A, 0, len(vf))
+			for _, v := range vf {
+				v2, err := mongoFilter(v, err)
+				if err != nil {
+					return nil, err
+				}
+				r = append(r, v2)
+			}
+			return r, nil
+		case map[string]interface{}:
+			r := make(bson.D, 0, len(vf))
+			for k, v := range vf {
+				if !isValidMongoOp(k) && !isBSONField(typo, k) {
+					return nil, fmt.Errorf("invalid filter key %q", k)
+				}
+				v2, err := mongoFilter(v, err)
+				if err != nil {
+					return nil, err
+				}
+				r = append(r, bson.E{Key:k, Value:v2})
+			}
+			return r, nil
+		default:
+			return nil, fmt.Errorf("unexpected type %T", filter)
+	}
+
+	return ret, nil
+
+	{{/* 
+	for k, v := range filter {
+		if !isValidMongoOp(k) && !isBSONField(k) {
+			return nil, fmt.Errorf("invalid filter key %q", k)
+		}
+		switch vt := v.(type) {
+		case float64, float32, int, int32, int64, string:
+			rfilter = append(rfilter, bson.E{Key:k, Value:vt})
+		case map[string]interface{}:
+			sub, _, err := mongoFilterAndSort(vt, nil, o)
+			if err != nil {
+				return nil, nil, err
+			}
+			rfilter = append(rfilter, bson.E{Key:k, Value:sub})
+		case []interface{}:
+			a := make(bson.A, 0, len(v))
+			for _, v2 := range vt {
+				sub, _, err := mongoFilterAndSort(v, nil, o)
+				if err != nil {
+					return nil, nil, err
+				}
+				a = append(a, sub)
+			}
+			rfilter = append(rfilter, bson.E{Key:k, Value:a})
+		}
+	}
+	*/}}
+}
+
+{{/*
+// mongoFilter examines a mongodb query and allows a specific subset to ensure
+// queries from external sources do not trigger unintended functionality.
+// Feel free to modify this function to your liking or use another approach, etc.
+// It is intended as a sensible default.
+// The value of o should be a struct or pointer to struct which is used to vet the field
+// names in the query.
+func mongoFilterAndSort(filter map[string]interface{}, sort []interface{}, o interface{}) (rfilter bson.D, rsort bson.D, rerr error) {
+
+	t := derefedType(o)
+
+
+	for _, v := range sort {
+		switch v.(type) {
+		case string: // string by itself means sort ascending
+			if !isValidField(v) {
+				return nil, fmt.Errorf("invalid field name %q", v)
+			}
+			rsort = append(rsort, primitive.E{Key:v, Value:1})
+		case map[string]interface{}:
+			if len(v) != 1 {
+				return nil, fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(v))
+			}
+			for k, n := range v {
+				if !isValidField(v) {
+					return nil, fmt.Errorf("invalid field name %q", k)
+				}
+				ns := fmt.Sprint(n)
+				switch ns {
+				case "1":
+					rsort = append(rsort, primitive.E{Key:v, Value:1})
+				case "-1":
+					rsort = append(rsort, primitive.E{Key:v, Value:1})
+				default:
+					return nil, fmt.Errorf("invalid sort order %q for field %q", ns, k)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("unknown type %T found in sort order", v)
+		}
+	}
+
+	return rfilter, rsort, rerr
+}
+*/}}
 {{end}}
 
 {{define "TestStore"}}
-import "testing"
+import (
+	"testing"
+	"fmt"
+	"context"
+    "os/exec"
+	"bytes"
+	"strings"
+	"strconv"
+	"math/rand"
+	"time"
 
-/*
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo"
+)
+
 // TestMain starts a shared mongodb docker container for the rest of the tests in this package to use.
 func TestMain(m *testing.M) {
 
-	tm, err := startMongo(nil)
-	if err != nil {
-		panic(err)
-	}
-	defer tm.Close()
-	testMongoURI = tm.URI
+	testMongo = startMongo(nil)
+	defer testMongo.Close()
 
 	m.Run()
+
 	// don't call os.Exit here because we want the defer to run
 	return
 }
 
-var testMongoURI string
+func newTestStore(t *testing.T) *Store {
+
+	c, err := mongo.NewClient(options.Client().ApplyURI(testMongo.URI()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err = c.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(c, testMongo.DB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+var testMongo *tmongo
 
 type tmongo struct {
-	URI string
+	uri string
+	dockerID string
+}
+
+// URI returns the MongoDB connection URI.
+func (tm *tmongo) URI() string {
+	return tm.uri
+}
+
+// DB returns a new database name.
+func (tm *tmongo) DB(t *testing.T) string {
+	return "gotest_"+strconv.FormatUint(rand.Uint64(), 16)
 }
 
 func (tm *tmongo) Close() error {
-	return nil
+	cmd := exec.Command("docker", "stop", tm.dockerID)
+	b, err := cmd.CombinedOutput()
+	if len(bytes.TrimSpace(b)) > 0 {
+		fmt.Printf("docker stop output:\n%s", b)
+	}
+	return err
 }
 
-func startMongo(t *testing.T) (*tmongo, error) {
-	if t != nil {
-		t.Helper()
+func startMongo(t *testing.T) *tmongo {
+	// TODO: it would be better if while it was downloading the image, etc. that output piped through so user can see
+	// TODO: figure out automatically select a free port
+	cmd := exec.Command("docker", "run", "--rm", "-d", "-p", "37017:27017", "-e" , "MONGO_INITDB_ROOT_USERNAME=root", "-e", "MONGO_INITDB_ROOT_PASSWORD=gotest", "mongo:latest")
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		if t != nil {
+			t.Fatal(err)
+		}
+		panic(err)
 	}
+	dockerID := strings.TrimSpace(string(b))
 	
+	return &tmongo {
+		uri: "mongodb://root:gotest@localhost:37017",
+		dockerID: dockerID,
+	}
 }
-*/
 {{end}}
 
 {{define "TYPEStore"}}
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
+{{/* FIXME: import fix hack for now, until we add whatever's needed so we can understand
+the types used in the original TYPE struct declaration */}}
+func tmpImportFix{{$.Struct.LocalName}}() { _ = primitive.ObjectID{} }
+
 // {{$.Struct.LocalName}}Store has mongodb storage methods for this type.
 type {{$.Struct.LocalName}}Store struct {
 	*Store // embed store for easy access
@@ -88,11 +381,109 @@ func (s *Store) {{$.Struct.LocalName}}() *{{$.Struct.LocalName}}Store {
 func (s *Store) col(opts ...*options.CollectionOptions) *mongo.Collection {
 	return s.db().Collection("{{$.Struct.LocalName}}", opts...)
 }
+
+{{/* following are not TYPEStore methods but it seems the best place to put this stuff for now */}}
+
+// {{$.Struct.LocalName}}List is a slice of {{$.Struct.QName}} with relevant methods.
+type {{$.Struct.LocalName}}List []{{$.Struct.QName}}
+
+// {{$.Struct.LocalName}}Result implements {{$.Struct.LocalName}}Resulter by adding
+// to the slice.
+func (l *{{$.Struct.LocalName}}List) {{$.Struct.LocalName}}Result(o {{$.Struct.QName}}) error {
+	*l = append(*l, o)
+	return nil
+}
+
+{{/* NOTE: Resulters get their result passeed by value so the caller doesn't hang onto
+a pointer to an instance that might be overwritten; and it provides allocation optimization
+opportunities. */}}
+// {{$.Struct.LocalName}}Resulter can receive {{$.Struct.QName}} instances as they 
+// are streamed from the underlying data source.
+type {{$.Struct.LocalName}}Resulter interface {
+	{{$.Struct.LocalName}}Result({{$.Struct.QName}}) error
+}
+
+// {{$.Struct.LocalName}}ResulterFunc allows implementation of {{$.Struct.QName}}Resulter as a function.
+type {{$.Struct.LocalName}}ResulterFunc func(o {{$.Struct.QName}}) error
+
+// {{$.Struct.LocalName}}ResulterFunc implements {{$.Struct.LocalName}}Resulter by calling f.
+func (f {{$.Struct.LocalName}}ResulterFunc) {{$.Struct.LocalName}}Result(o {{$.Struct.QName}}) error {
+	return f(o)
+}
+
 {{end}}
+
+{{define "TYPEInsert"}}
+import "context"
+import "reflect"
+import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
+// Insert will insert a record.
+func (s *{{$.Struct.LocalName}}Store) Insert(ctx context.Context, o *{{$.Struct.QName}}) error {
+	{{$idf := index $.Struct.FieldList.PK 0}}
+	if reflect.ValueOf(o.{{$idf.GoName}}).IsZero() {
+		o.{{$idf.GoName}} = primitive.NewObjectID()
+	}
+	_, err := s.col().InsertOne(ctx, o)
+	return err
+}
+{{end}}
+
+{{define "TYPEDelete"}}
+import "context"
+import "go.mongodb.org/mongo-driver/bson"
+
+// Delete removes a the indicated record.
+func (s *{{$.Struct.LocalName}}Store) Delete(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) error {
+	_, err := s.col().DeleteOne(ctx, bson.D{ {{range $.Struct.FieldList.PK}}
+		{"{{.BSONName}}", v{{.GoName}}},
+	{{end}}
+    })
+	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
+		err = &ErrNotFound{Err: err}
+	}
+	return err
+}
+{{end}}
+
+{{define "TYPEUpdate"}}
+import "context"
+import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
+// Update overwrites an existing record.
+func (s *{{$.Struct.LocalName}}Store) Update(ctx context.Context, o *{{$.Struct.QName}}) error {
+	{{$idf := index $.Struct.FieldList.PK 0}}
+	_, err := s.col().UpdateOne(ctx,
+		bson.D{ {{range $.Struct.FieldList.PK}}
+			{"{{.BSONName}}", o.{{.GoName}}},
+		{{end}} },
+		bson.D{ {"$set", o} },
+	)
+	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
+		err = &ErrNotFound{Err: err}
+	}
+	return err
+}
+{{end}}
+
+{{/* 
+Select (streaming)
+SelectCursor (streaming, uses fields as cursor)
+Count (just the criteria and returns count)
+TYPEList - implements stream loading for Select methods
+will need interface like TYPEResult and TYPEResultFunc
+Put a big comment somewhere in the file about how people can and should
+add custom query methods to do more complex things, instead
+of hacking apart Select and SelectCursor
+*/}}
 
 {{define "TYPESelectByID"}}
 import "context"
+import "errors"
 import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/mongo"
 
 // SelectByID returns the matching record by primary key.
 func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) (*{{$.Struct.QName}}, error) {
@@ -101,14 +492,125 @@ func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.
 		{"{{.BSONName}}", v{{.GoName}}},
 	{{end}}
     }).Decode(&ret)
+	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
+		err = &ErrNotFound{Err: err}
+	}
 	return &ret, err
 }
 {{end}}
 
-{{define "TestTYPESelectByID"}}
-import "testing"
+{{define "TYPESelect"}}
+import "errors"
 
-func Test{{$.Struct.LocalName}}SelectByID(t *testing.T) {
-	t.Fatal("TODO")
+// Select runs the indicated query and loads it's return into result.
+func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit int64, critiera map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) error {
+
+	if result == nil {
+		return errors.New("result must not be nil")
+	}
+
+	var v {{$.Struct.LocalName}}
+
+	filter, err := mongoFilter(critiera, &v)
+	if err != nil {
+		return err
+	}
+	sort, err := mongoSort(orderBy, &v)
+	if err != nil {
+		return err
+	}
+
+	cursor, err := s.col().Find(ctx, filter, &options.FindOptions{ Limit: &limit, Skip: &offset, Sort: sort })
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		v = {{$.Struct.LocalName}} {}
+		err := cursor.Decode(&v)
+		if err != nil {
+			return err
+		}
+		err = result.{{$.Struct.LocalName}}Result(v)
+		if err != nil {
+			return err
+		}
+	}
+
+	return cursor.Err()
+}
+{{end}}
+
+{{define "TYPESelectCursor"}}
+// SelectCursor is similar to Select but instead of specifying an offset and limit it uses a cursor.
+// Useful for iterating over large datasets where computing the total size or 
+func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit int64, cursor []interface{}, critiera map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) (nextCursor []interface{}, e error) {
+
+	// TODO: we should probably implement this on top of Select()
+	// $and the cursor to the query if present
+	// collect the last record's field values and return as cursor
+	panic("TODO")
+	
+}
+{{end}}
+
+{{define "TYPECount"}}
+// Count returns the count of the result of the indicated query.
+func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[string]interface{}) (int64, error) {
+	var v {{$.Struct.LocalName}}
+	filter, err := mongoFilter(critiera, &v)
+	if err != nil {
+		return 0, err
+	}
+	return s.col().CountDocuments(ctx, filter)
+}
+{{end}}
+
+{{define "TestTYPE"}}
+import "testing"
+import "context"
+import "errors"
+
+func Test{{$.Struct.LocalName}}CRUD(t *testing.T) {
+	
+	{{$idf := index $.Struct.FieldList.PK 0}}
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	o := {{$.Struct.LocalName}}{}
+	err := store.{{$.Struct.LocalName}}().Insert(ctx, &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := o.{{$idf.GoName}}
+
+	t.Logf("ObjectID: %v", id)
+
+	o2, err := store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.{{$idf.GoName}} != o2.{{$idf.GoName}} {
+		t.Errorf("mismatched IDs, expected: %v, actual: %v", o.{{$idf.GoName}}, o2.{{$idf.GoName}})
+	}
+
+	err = store.{{$.Struct.LocalName}}().Update(ctx, o2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.{{$.Struct.LocalName}}().Delete(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
+	var errNotFound *ErrNotFound
+	if !(err != nil && errors.As(err, &errNotFound)) {
+		t.Errorf("unexpected select result after delete: %v", err)
+	}
+
 }
 {{end}}

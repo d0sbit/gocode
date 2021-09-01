@@ -196,7 +196,14 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 		trList, err := tmplToTransforms(fn, data, tmpl,
 			"TYPEStore",
 			"TYPEStoreMethods",
-			"TYPESelectByID", // FIJXME: filter which things go here base on flags
+			// FIJXME: filter which things go here base on flags
+			"TYPEInsert",
+			"TYPEDelete",
+			"TYPEUpdate",
+			"TYPESelectByID",
+			"TYPESelect",
+			"TYPESelectCursor",
+			"TYPECount",
 		)
 		if err != nil {
 			log.Fatal(err)
@@ -209,7 +216,7 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 		fn := *testFileF
 		fmtt.FilenameList = append(fmtt.FilenameList, fn)
 		trList, err := tmplToTransforms(fn, data, tmpl,
-			"TestTYPESelectByID", // FIJXME: filter which things go here base on flags
+			"TestTYPE",
 		)
 		if err != nil {
 			log.Fatal(err)

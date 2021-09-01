@@ -18,8 +18,12 @@ func TestMaine(t *testing.T) {
 	must(t, os.Mkdir(filepath.Join(modDir, "a"), 0755))
 	must(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module test1\n"), 0644))
 	must(t, os.WriteFile(filepath.Join(modDir, "a/types.go"), []byte(`package a
+
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
 type A struct {
-	ID string `+"`bson:\"_id\"`"+`
+	ID primitive.ObjectID `+"`bson:\"_id\"`"+`
+	Name string `+"`bson:\"name\"`"+`
 }
 `), 0644))
 

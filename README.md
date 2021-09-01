@@ -39,17 +39,41 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 ## Notes
 
 TODO:
-* Get main test output building - DONE
-  - debug gofmt DONE
-  - add output for AStore if it doesn't exist DONE
-  - add output for Store if it doesn't exists DONE
-* Write import deduplicator (useful as it's own thing separate from the add import transform) DONE
-* Make test case have a method that lights up a mongodb docker container and runs the whole thing
-* Implement -dry-run
 * Add remaining methods to get full CRUD
+  - various selects (select, count, select cursor, stream->slice)
+  - tests
+* Implement -dry-run
 * Make a punchlist of what is left to round off mongdob
+  - ensure both the module dir and module dir + "a" both work and are tested
+  - fiddle with it a bit from the command line, just make sure it's generally working
 * Then move onto sql version (decide which library to use - sqlx is a decent choice)
   - with mysql docker test case
+  - sort out tx behavior - could have separate Tx method vs not or we could try attaching the tx to the context (actually this moves to the SQL version because no tx in mongo, but attaching to ctx keeps same signature everywhere which is a good thing)
+* Handlers
+  - see if we can expression permissions with a super simple interface abstraction, e.g. CanRead(interface{}) bool, etc.
+    it should be optional, but could let us have perms from the get-go without
+  - both PUT and PATCH support
+  - querying should default to "normal" way but have a few lines of commented code to switch to cursor
+  - we can probably incorporate the key aspects of werr as helper methods - probably too simple to introduce a dependency
+    - probably we should support the wrapped return value approach but also a simple helper method or two for outputting
+      errors with a public message (since the controller usually handles that anyway), this way the only interface thing
+      we need is the HTTP status code
+    - or maybe not even bother with the wrapped error approach, as long as the helper methods are clear and simple
+    - decide what to do with the other options: ID, location info
+    - longer version, still good: if err != nil { w.WriteStatus(statusCode(err)); w.Write(logErr(err)); return }
+    - maybe a bit more compact: if err != nil { writeErrf(w, 0, err, "something went wrong: %d", n) }
+    - should there also be a writeErr(w, 0, err), what about writeErr(w, 0, err, "public message")
+    - 0 means extract status from err or 500
+    - writeErr can itself have the file:line and ID stuff in there, maybe file:line commented out by default
+    - maybe we don't need wrap function at all
+    - writeErrf(w http.ResponseWriter, status int, err error, responseFormat string, args ...interface{})
+      - if status is 0 detect from err or 500
+      - if err is nil then don't log
+      - if responseFormat is "" then don't write to output
+* Decide what we want to do about main program, need at least something for that
+* UI
+  - common flags approach so we can communicate to the UI what each program needs
+  - diff'ed (dry-run) output
 
 ---
 
