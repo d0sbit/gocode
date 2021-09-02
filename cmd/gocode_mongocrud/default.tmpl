@@ -121,6 +121,8 @@ func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
 
 	typo := derefedType(o)
 
+	ret = make(bson.D, 0, len(sort))
+
 	for _, v := range sort {
 		switch vt := v.(type) {
 		case string: // string by itself means sort ascending
@@ -166,6 +168,8 @@ func mongoFilter(filter map[string]interface{}, o interface{}) (ret bson.D, err 
 
 	typo := derefedType(o)
 
+	ret = make(bson.D, 0, len(filter)) // mongo driver barfs with nil bson.D
+
 floop:
 	for k, v := range filter {
 		if bsonField(typo, k) == nil {
@@ -201,115 +205,8 @@ floop:
 	}
 
 	return ret, nil
-
-	{{/* 
-	switch vf := filter.(type) {
-		case float64, float32, int, int32, int64, string:
-			return vf, nil // these are returned as-is
-		case []interface{}:
-			r := make(bson.A, 0, len(vf))
-			for _, v := range vf {
-				v2, err := mongoFilter(v, err)
-				if err != nil {
-					return nil, err
-				}
-				r = append(r, v2)
-			}
-			return r, nil
-		case map[string]interface{}:
-			r := make(bson.D, 0, len(vf))
-			for k, v := range vf {
-				if !isValidMongoOp(k) && bsonField(typo, k) == nil {
-					return nil, fmt.Errorf("invalid filter key %q", k)
-				}
-				v2, err := mongoFilter(v, err)
-				if err != nil {
-					return nil, err
-				}
-				r = append(r, bson.E{Key:k, Value:v2})
-			}
-			return r, nil
-		default:
-			return nil, fmt.Errorf("unexpected type %T", filter)
-	}
-
-	return ret, nil
-	*/}}
-
-	{{/* 
-	for k, v := range filter {
-		if !isValidMongoOp(k) && !bsonField(k) {
-			return nil, fmt.Errorf("invalid filter key %q", k)
-		}
-		switch vt := v.(type) {
-		case float64, float32, int, int32, int64, string:
-			rfilter = append(rfilter, bson.E{Key:k, Value:vt})
-		case map[string]interface{}:
-			sub, _, err := mongoFilterAndSort(vt, nil, o)
-			if err != nil {
-				return nil, nil, err
-			}
-			rfilter = append(rfilter, bson.E{Key:k, Value:sub})
-		case []interface{}:
-			a := make(bson.A, 0, len(v))
-			for _, v2 := range vt {
-				sub, _, err := mongoFilterAndSort(v, nil, o)
-				if err != nil {
-					return nil, nil, err
-				}
-				a = append(a, sub)
-			}
-			rfilter = append(rfilter, bson.E{Key:k, Value:a})
-		}
-	}
-	*/}}
 }
 
-{{/*
-// mongoFilter examines a mongodb query and allows a specific subset to ensure
-// queries from external sources do not trigger unintended functionality.
-// Feel free to modify this function to your liking or use another approach, etc.
-// It is intended as a sensible default.
-// The value of o should be a struct or pointer to struct which is used to vet the field
-// names in the query.
-func mongoFilterAndSort(filter map[string]interface{}, sort []interface{}, o interface{}) (rfilter bson.D, rsort bson.D, rerr error) {
-
-	t := derefedType(o)
-
-
-	for _, v := range sort {
-		switch v.(type) {
-		case string: // string by itself means sort ascending
-			if !isValidField(v) {
-				return nil, fmt.Errorf("invalid field name %q", v)
-			}
-			rsort = append(rsort, primitive.E{Key:v, Value:1})
-		case map[string]interface{}:
-			if len(v) != 1 {
-				return nil, fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(v))
-			}
-			for k, n := range v {
-				if !isValidField(v) {
-					return nil, fmt.Errorf("invalid field name %q", k)
-				}
-				ns := fmt.Sprint(n)
-				switch ns {
-				case "1":
-					rsort = append(rsort, primitive.E{Key:v, Value:1})
-				case "-1":
-					rsort = append(rsort, primitive.E{Key:v, Value:1})
-				default:
-					return nil, fmt.Errorf("invalid sort order %q for field %q", ns, k)
-				}
-			}
-		default:
-			return nil, fmt.Errorf("unknown type %T found in sort order", v)
-		}
-	}
-
-	return rfilter, rsort, rerr
-}
-*/}}
 {{end}}
 
 {{define "TestStore"}}
@@ -519,17 +416,6 @@ func (s *{{$.Struct.LocalName}}Store) Update(ctx context.Context, o *{{$.Struct.
 }
 {{end}}
 
-{{/* 
-Select (streaming)
-SelectCursor (streaming, uses fields as cursor)
-Count (just the criteria and returns count)
-TYPEList - implements stream loading for Select methods
-will need interface like TYPEResult and TYPEResultFunc
-Put a big comment somewhere in the file about how people can and should
-add custom query methods to do more complex things, instead
-of hacking apart Select and SelectCursor
-*/}}
-
 {{define "TYPESelectByID"}}
 import "context"
 import "errors"
@@ -552,8 +438,14 @@ func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.
 
 {{define "TYPESelect"}}
 import "errors"
+import "log"
+
+var _ log.Logger  // tmp
 
 // Select runs the indicated query and loads it's return into result.
+// TODO: explain args
+// Note that for more complex query needs it is recommended you add a custom select function
+// instead of trying to adapt this one to every use case.
 func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit int64, critiera map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) error {
 
 	if result == nil {
@@ -596,6 +488,8 @@ func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit 
 {{define "TYPESelectCursor"}}
 // SelectCursor is similar to Select but instead of specifying an offset and limit it uses a cursor.
 // Useful for iterating over large datasets where computing the total size or 
+// Note that for more complex query needs it is recommended you add a custom select function
+// instead of trying to adapt this one to every use case.
 func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit int64, cursor []interface{}, critiera map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) (nextCursor []interface{}, e error) {
 
 	// TODO: we should probably implement this on top of Select()
@@ -665,13 +559,14 @@ func Test{{$.Struct.LocalName}}CRUD(t *testing.T) {
 
 }
 
-/*
 func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 	
 	{{$idf := index $.Struct.FieldList.PK 0}}
 
 	store := newTestStore(t)
 	ctx := context.Background()
+	var err error
+	var result {{$.Struct.LocalName}}List
 
 	var records [5]{{$.Struct.LocalName}}
 	for i := range records {
@@ -682,11 +577,25 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 		}
 	}
 
-	panic("FIXME: we need a hack for the ObjectID type in an _id field; hm, what about joined")
-	var result {{$.Struct.LocalName}}List
-	err := store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, map[string]interface{"_id":""}, orderBy []interface{}, result {{$.Struct.QName}}Resulter)
+	result = nil
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, nil, []interface{}{"_id"}, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 2 {
+		t.Errorf("unexpected result length %d", len(result))
+	}
+
+	result = nil
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 0, nil, []interface{}{"_id"}, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 5 {
+		t.Errorf("unexpected result length %d", len(result))
+	}
+
 
 }
-*/
 
 {{end}}
