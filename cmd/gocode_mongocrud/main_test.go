@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +12,7 @@ func TestMaine(t *testing.T) {
 
 	var modDir string
 	modDir = t.TempDir()
-	modDir, _ = ioutil.TempDir("", "TestMaine")
+	// modDir, _ = ioutil.TempDir("", "TestMaine")
 	t.Logf("modDir: %s", modDir)
 	must(t, os.Mkdir(filepath.Join(modDir, "a"), 0755))
 	must(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module test1\n"), 0644))

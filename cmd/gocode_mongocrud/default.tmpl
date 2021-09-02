@@ -81,9 +81,9 @@ func isValidMongoOp(v string) bool {
 	return false
 }
 
-// isBSONField returns true if there is a bson struct tag with the name v in type t.
-// t must correspond to a struct type
-func isBSONField(t reflect.Type, v string) bool {
+// bsonField returns the field with a bson struct tag with the name v in type t.
+// t must correspond to a struct type.  Returns nil if not found
+func bsonField(t reflect.Type, v string) *reflect.StructField {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		bsonName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
@@ -91,10 +91,23 @@ func isBSONField(t reflect.Type, v string) bool {
 			continue
 		}
 		if bsonName == v {
-			return true
+			return &f
 		}
 	}
-	return false
+	return nil
+}
+
+func mongoFixInputValue(v interface{}, t reflect.Type, k string) (interface{}, error) {
+	bf := bsonField(t, k)
+	if bf == nil {
+		return nil, fmt.Errorf("invalid field name %q", k)
+	}
+	var id primitive.ObjectID
+	if bf.Type.AssignableTo(reflect.TypeOf(id)) {
+		id, err := primitive.ObjectIDFromHex(fmt.Sprint(v))
+		return id, err
+	}
+	return v, nil
 }
 
 // mongoSort returns a bson.D appropriate for a mongo query given the specified input.
@@ -111,7 +124,7 @@ func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
 	for _, v := range sort {
 		switch vt := v.(type) {
 		case string: // string by itself means sort ascending
-			if !isBSONField(typo, vt) {
+			if bsonField(typo, vt) == nil {
 				return nil, fmt.Errorf("invalid field name %q", v)
 			}
 			ret = append(ret, primitive.E{Key:vt, Value:1})
@@ -120,7 +133,7 @@ func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
 				return nil, fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(vt))
 			}
 			for k, n := range vt {
-				if !isBSONField(typo, k) {
+				if bsonField(typo, k) == nil {
 					return nil, fmt.Errorf("invalid field name %q", k)
 				}
 				ns := fmt.Sprint(n)
@@ -142,17 +155,54 @@ func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
 }
 
 // mongoFilter returns a value appropriate for a mongo query given the specified input.
-// The filter should be map[string]interface{} with values of either map[string]interface{},
-// []interface{} or other appropriate primitives (JSON deserialized to a map works).
-// If a map[string]interface{} is passed in as filter, then any non-nil return value is guaranteed
-// to be of type bson.D.
-// isValidMongoOp and isBSONField are used to verify map keys and thus avoid allowing
+// The filter must be a map with field names as keys and the values must be either appropriate
+// primitive types or another map with a supported operator.  This simplification of the mongo
+// query syntax allows us to vet the input as well as handle type conversions for field types
+// that don't have a corresponding JSONizable representation.
+// isValidMongoOp and bsonField are used to verify map keys and thus avoid allowing
 // unintended functionality.
 // o is the object to check for fields against.
-func mongoFilter(filter interface{}, o interface{}) (ret interface{}, err error) {
+func mongoFilter(filter map[string]interface{}, o interface{}) (ret bson.D, err error) {
 
 	typo := derefedType(o)
 
+floop:
+	for k, v := range filter {
+		if bsonField(typo, k) == nil {
+			return nil, fmt.Errorf("invalid filter key %q", k)
+		}
+		switch tv := v.(type) {
+		case float64, float32, int, int32, int64, string:
+			v2, err := mongoFixInputValue(v, typo, k)
+			if err != nil {
+				return nil, err
+			}
+			ret = append(ret, bson.E{Key:k, Value:v2})
+			continue floop
+		case map[string]interface{}:
+			if len(tv) != 1 {
+				return nil, fmt.Errorf("nested maps must only have one entry, key %q", k)
+			}
+			for subk, subv := range tv { // executes exactly once
+				if !isValidMongoOp(subk) {
+					return nil, fmt.Errorf("invalid key %q.%q in nesetd map", k, subk)
+				}
+				switch subvv := subv.(type) {
+				case float64, float32, int, int32, int64, string:
+					v2, err := mongoFixInputValue(subvv, typo, subk)
+					if err != nil {
+						return nil, err
+					}
+					ret = append(ret, bson.E{Key:k, Value:bson.D{bson.E{Key:subk, Value:v2}}})
+					continue floop
+				}
+			}
+		}
+	}
+
+	return ret, nil
+
+	{{/* 
 	switch vf := filter.(type) {
 		case float64, float32, int, int32, int64, string:
 			return vf, nil // these are returned as-is
@@ -169,7 +219,7 @@ func mongoFilter(filter interface{}, o interface{}) (ret interface{}, err error)
 		case map[string]interface{}:
 			r := make(bson.D, 0, len(vf))
 			for k, v := range vf {
-				if !isValidMongoOp(k) && !isBSONField(typo, k) {
+				if !isValidMongoOp(k) && bsonField(typo, k) == nil {
 					return nil, fmt.Errorf("invalid filter key %q", k)
 				}
 				v2, err := mongoFilter(v, err)
@@ -184,10 +234,11 @@ func mongoFilter(filter interface{}, o interface{}) (ret interface{}, err error)
 	}
 
 	return ret, nil
+	*/}}
 
 	{{/* 
 	for k, v := range filter {
-		if !isValidMongoOp(k) && !isBSONField(k) {
+		if !isValidMongoOp(k) && !bsonField(k) {
 			return nil, fmt.Errorf("invalid filter key %q", k)
 		}
 		switch vt := v.(type) {
@@ -613,4 +664,29 @@ func Test{{$.Struct.LocalName}}CRUD(t *testing.T) {
 	}
 
 }
+
+/*
+func Test{{$.Struct.LocalName}}Select(t *testing.T) {
+	
+	{{$idf := index $.Struct.FieldList.PK 0}}
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	var records [5]{{$.Struct.LocalName}}
+	for i := range records {
+		records[i] = {{$.Struct.LocalName}}{}
+		err := store.{{$.Struct.LocalName}}().Insert(ctx, &records[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	panic("FIXME: we need a hack for the ObjectID type in an _id field; hm, what about joined")
+	var result {{$.Struct.LocalName}}List
+	err := store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, map[string]interface{"_id":""}, orderBy []interface{}, result {{$.Struct.QName}}Resulter)
+
+}
+*/
+
 {{end}}
