@@ -83,15 +83,36 @@ func isValidMongoOp(v string) bool {
 
 // bsonField returns the field with a bson struct tag with the name v in type t.
 // t must correspond to a struct type.  Returns nil if not found
-func bsonField(t reflect.Type, v string) *reflect.StructField {
+func bsonField(t reflect.Type, k string) *reflect.StructField {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		bsonName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
 		if bsonName == "" || bsonName == "-" {
 			continue
 		}
-		if bsonName == v {
+		if bsonName == k {
 			return &f
+		}
+	}
+	return nil
+}
+
+// bsonFieldValue returns the value of the struct field
+// with bson tag k, or nil if no such field
+func bsonFieldValue(o interface{}, k string) interface{} {
+	v := reflect.ValueOf(o)
+	for v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		bsonName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
+		if bsonName == "" || bsonName == "-" {
+			continue
+		}
+		if bsonName == k {
+			return v.Field(i).Interface()
 		}
 	}
 	return nil
@@ -136,7 +157,7 @@ func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
 			}
 			for k, n := range vt {
 				if bsonField(typo, k) == nil {
-					return nil, fmt.Errorf("invalid field name %q", k)
+					return nil, fmt.Errorf("invalid field name (2) %q", k)
 				}
 				ns := fmt.Sprint(n)
 				switch ns {
@@ -193,7 +214,7 @@ floop:
 				}
 				switch subvv := subv.(type) {
 				case float64, float32, int, int32, int64, string:
-					v2, err := mongoFixInputValue(subvv, typo, subk)
+					v2, err := mongoFixInputValue(subvv, typo, k)
 					if err != nil {
 						return nil, err
 					}
@@ -438,9 +459,9 @@ func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.
 
 {{define "TYPESelect"}}
 import "errors"
-import "log"
 
-var _ log.Logger  // tmp
+//import "log"
+//var _ log.Logger  // tmp
 
 // Select runs the indicated query and loads it's return into result.
 // TODO: explain args
@@ -486,17 +507,85 @@ func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit 
 {{end}}
 
 {{define "TYPESelectCursor"}}
+import "encoding/json"
+import "encoding/base64"
+import "fmt"
+//import "log"
+
+//var _ log.Logger
+
 // SelectCursor is similar to Select but instead of specifying an offset and limit it uses a cursor.
-// Useful for iterating over large datasets where computing the total size or 
+// Useful for iterating over large datasets where computing the total size or ...
+// TODO: explain args
 // Note that for more complex query needs it is recommended you add a custom select function
 // instead of trying to adapt this one to every use case.
-func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit int64, cursor []interface{}, critiera map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) (nextCursor []interface{}, e error) {
+func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit int64, cursor string, criteria map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) (nextCursor string, err error) {
 
-	// TODO: we should probably implement this on top of Select()
-	// $and the cursor to the query if present
-	// collect the last record's field values and return as cursor
-	panic("TODO")
+	if cursor != "" {
+		cursorj, err := base64.RawURLEncoding.DecodeString(cursor)
+		if err != nil {
+			return "", fmt.Errorf("cursor decode error: %w", err)
+		}
+		cspec := make(map[string]interface{})
+		err = json.Unmarshal(cursorj, &cspec)
+		if err != nil {
+			return "", fmt.Errorf("cursor unmarshal error: %w", err)
+		}
+		n := 0
+		ncriteria := make(map[string]interface{}, len(criteria))
+		for k, v := range criteria {
+			ncriteria[k] = v
+		}
+		for k, v := range cspec {
+			n++
+			if _, exists := ncriteria[k]; exists {
+				return "", fmt.Errorf("criteria contains cursor field %q", k)
+			}
+			if n == len(cspec) {
+				ncriteria[k] = map[string]interface{}{"$gt":v}
+			} else {
+				ncriteria[k] = map[string]interface{}{"$gte":v}
+			}
+		}
+		criteria = ncriteria
+	}
+
+	rcount := 0
+	cout := make(map[string]interface{}, len(orderBy))
+	r2 := {{$.Struct.LocalName}}ResulterFunc(func(o {{$.Struct.QName}}) error {
+		rcount++
+		for _, ov := range orderBy {
+			switch ov2 := ov.(type) {
+			case string:
+				cout[ov2] = bsonFieldValue(o, ov2)
+			case map[string]interface{}:
+				for k := range ov2 {
+					//cout[k] = map[string]interface{}{
+					cout[k] = bsonFieldValue(o, k)
+				}
+			default:
+				return fmt.Errorf("unknown type in orderBy entry %T", ov)
+			}
+		}
+		return result.{{$.Struct.LocalName}}Result(o)
+	})
+	//log.Printf("criteria: %#v", criteria)
+	//log.Printf("orderBy: %#v", orderBy)
+	err = s.Select(ctx, 0, limit, criteria, orderBy, &r2)
+	if err != nil {
+		return "", err
+	}
 	
+	// if no results, then return the same cursor (at end of list)
+	if rcount == 0 {
+		return cursor, nil
+	}
+
+	cursorb, err := json.Marshal(cout)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(cursorb), nil
 }
 {{end}}
 
@@ -570,11 +659,19 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 
 	var records [5]{{$.Struct.LocalName}}
 	for i := range records {
-		records[i] = {{$.Struct.LocalName}}{}
+		records[i] = {{$.Struct.QName}}{}
 		err := store.{{$.Struct.LocalName}}().Insert(ctx, &records[i])
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	count, err := store.{{$.Struct.LocalName}}().Count(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(count) != len(records) {
+		t.Errorf("unexpected Count(): %d", count)
 	}
 
 	result = nil
@@ -594,8 +691,49 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 	if len(result) != 5 {
 		t.Errorf("unexpected result length %d", len(result))
 	}
+}
 
+func Test{{$.Struct.LocalName}}SelectCursor(t *testing.T) {
+	
+	{{$idf := index $.Struct.FieldList.PK 0}}
 
+	store := newTestStore(t)
+	ctx := context.Background()
+	var err error
+	var result {{$.Struct.LocalName}}List
+
+	var records [5]{{$.Struct.LocalName}}
+	for i := range records {
+		records[i] = {{$.Struct.QName}}{}
+		err := store.{{$.Struct.LocalName}}().Insert(ctx, &records[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cursor := ""
+	result = nil
+	loopCount := 0
+	for i := 0; i < 10; i++{
+		var nextRes {{$.Struct.LocalName}}List
+		cursor, err = store.{{$.Struct.LocalName}}().SelectCursor(ctx, 2, cursor, nil, []interface{}{"_id"}, &nextRes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		//t.Logf("cursor: %q", cursor)
+		result = append(result, nextRes...)
+		if len(nextRes) == 0 {
+			break
+		}
+		loopCount++
+	}
+
+	if len(result) != 5 {
+		t.Errorf("unexpected result length %d", len(result))
+	}
+	if loopCount != 3 {
+		t.Errorf("unexpected loopCount %d", loopCount)
+	}
 }
 
 {{end}}
