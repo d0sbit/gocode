@@ -39,8 +39,6 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 ## Notes
 
 TODO:
-* Either simplify the helper functions, or move them to a separate d0sbit repo.
-  Maybe also just a separate file would help keep it organized.
 * Make a punchlist of what is left to round off mongdob
   - fix bug where subdirs error
   - ensure both the module dir and module dir + "a" both work and are tested

@@ -196,6 +196,7 @@ func (p *Package) readFile(filename string) ([]byte, error) {
 
 // fileNames returns the merged list of files from the package dir.
 // The names returned are just the file names, not the full path.
+// Any subdirectories are ignored.
 func (p *Package) fileNames() ([]string, error) {
 
 	retMap := make(map[string]struct{}, 8)
@@ -205,6 +206,9 @@ func (p *Package) fileNames() ([]string, error) {
 		return nil, err
 	}
 	for _, de := range dirEntryList {
+		if de.IsDir() {
+			continue
+		}
 		retMap[de.Name()] = struct{}{}
 	}
 
@@ -213,6 +217,9 @@ func (p *Package) fileNames() ([]string, error) {
 		return nil, err
 	}
 	for _, de := range dirEntryList {
+		if de.IsDir() {
+			continue
+		}
 		retMap[de.Name()] = struct{}{}
 	}
 

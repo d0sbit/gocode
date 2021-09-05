@@ -76,6 +76,36 @@ type A struct {
 
 }
 
+func TestMaineSubDirs(t *testing.T) {
+
+	// make sure subdirs in the package folder don't cause an issue
+
+	var modDir string
+	modDir = t.TempDir()
+	// modDir, _ = ioutil.TempDir("", "TestMaine")
+	t.Logf("modDir: %s", modDir)
+	must(t, os.Mkdir(filepath.Join(modDir, "a"), 0755))
+	must(t, os.Mkdir(filepath.Join(modDir, "a/tmp"), 0755))
+	must(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module test1\n"), 0644))
+	must(t, os.WriteFile(filepath.Join(modDir, "a/types.go"), []byte(`package a
+
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
+type A struct {
+	ID primitive.ObjectID `+"`bson:\"_id\"`"+`
+	Name string `+"`bson:\"name\"`"+`
+}
+`), 0644))
+
+	// run the code generator
+	must(t, os.Chdir(modDir))
+	flset := flag.NewFlagSet(os.Args[0], flag.PanicOnError)
+	ret := maine(flset, []string{"-package=a", "-type=A", "-dry-run=html", "-json"})
+	if ret != 0 {
+		t.Errorf("ret = %d", ret)
+	}
+
+}
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
