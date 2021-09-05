@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -36,8 +38,9 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	storeFileF := flagSet.String("store-file", "store.go", "Filename for the Store type")
 	storeTestFileF := flagSet.String("store-test-file", "store_test.go", "Filename for the Store type tests")
 	packageF := flagSet.String("package", "", "Package or directory to analyze/write to")
-	dryRunF := flagSet.Bool("dry-run", false, "Do not apply changes, only output diff of what would change")
-	noGofmtF := flagSet.Bool("-no-gofmt", false, "Do not gofmt the output")
+	dryRunF := flagSet.String("dry-run", "off", "Do not apply changes, only output diff of what would change. Value specifies format, 'term' for terminal pretty text, 'html' for HTML, or 'off' to disable.")
+	noGofmtF := flagSet.Bool("no-gofmt", false, "Do not gofmt the output")
+	jsonF := flagSet.Bool("json", false, "Write output as JSON")
 	allF := flagSet.Bool("all", false, "Generate all methods")
 
 	// TODO:
@@ -117,7 +120,7 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	// output is either same as input or memory for dry-run
 	var outFS fs.FS
 	var dryRunFS *memfs.FS
-	if !*dryRunF {
+	if *dryRunF == "off" {
 		outFS = inFS
 	} else {
 		dryRunFS = memfs.New()
@@ -147,14 +150,6 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	if err != nil {
 		log.Fatalf("failed to extract field info from type %q: %v", typeName, err)
 	}
-	// log.Printf("s.PKAsLocalVarList: %#v", s.PKAsLocalVarList())
-
-	// implement methods like Struct.Name and Struct.PKAsLocalVarList
-
-	// b, err := defaultTmplFS.ReadFile("default.tmpl")
-	// if err != nil {
-	// 	panic(err)
-	// }
 
 	// execute template
 	data := struct {
@@ -169,6 +164,16 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 
 	fmtt := &srcedit.GofmtTransform{}
 	var trs []srcedit.Transform
+
+	{
+		fn := "mongoutil.go"
+		fmtt.FilenameList = append(fmtt.FilenameList, fn)
+		trList, err := tmplToTransforms(fn, data, tmpl, "MongoUtil")
+		if err != nil {
+			log.Fatal(err)
+		}
+		trs = append(trs, trList...)
+	}
 
 	{
 		fn := *storeFileF
@@ -229,37 +234,6 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	}
 	trs = append(trs, dd)
 
-	// var selectBuf bytes.Buffer
-	// err = tmpl.ExecuteTemplate(&selectBuf, "TYPESelectByID", data)
-	// if err != nil {
-	// 	log.Fatalf("TYPESelectByID template exec error: %v", err)
-	// }
-
-	// var testSelectBuf bytes.Buffer
-	// err = tmpl.ExecuteTemplate(&testSelectBuf, "TestTYPESelectByID", data)
-	// if err != nil {
-	// 	log.Fatalf("TestTYPESelectByID template exec error: %v", err)
-	// }
-
-	// // use srcedit to parse results into transforms and apply them
-
-	// var trs []srcedit.Transform
-
-	// {
-	// 	trs2, err := srcedit.ParseTransforms(*fileF, selectBuf.String())
-	// 	if err != nil {
-	// 		log.Fatalf("transform parse error: %v", err)
-	// 	}
-	// 	trs = append(trs, trs2...)
-	// }
-	// {
-	// 	trs2, err := srcedit.ParseTransforms(*testFileF, testSelectBuf.String())
-	// 	if err != nil {
-	// 		log.Fatalf("test transform parse error: %v", err)
-	// 	}
-	// 	trs = append(trs, trs2...)
-	// }
-
 	if !*noGofmtF {
 		trs = append(trs, fmtt)
 	}
@@ -269,7 +243,28 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 		log.Fatalf("apply transform error: %v", err)
 	}
 
-	// for dry-run, make something that can compare infs and outfs and create a diff
+	if *dryRunF != "off" {
+		diffMap, err := runDiff(inFS, outFS, ".", *dryRunF)
+		if err != nil {
+			log.Fatalf("error running diff: %v", err)
+		}
+		if *jsonF {
+			enc := json.NewEncoder(os.Stdout)
+			enc.Encode(map[string]interface{}{
+				"diff": diffMap,
+			})
+		} else {
+			klist := make([]string, 0, len(diffMap))
+			for k := range diffMap {
+				klist = append(klist, k)
+			}
+			sort.Strings(klist)
+			for _, k := range klist {
+				fmt.Printf("### %s\n", k)
+				fmt.Println(diffMap[k])
+			}
+		}
+	}
 
 	return 0
 }

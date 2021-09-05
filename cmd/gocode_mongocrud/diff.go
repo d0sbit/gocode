@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"io/ioutil"
-	"strings"
 
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
@@ -16,7 +15,8 @@ func runDiff(in, out fs.FS, rootDir string, outType string) (map[string]string, 
 	ret := make(map[string]string)
 
 	trimPath := func(p string) string {
-		return strings.TrimPrefix(strings.TrimPrefix(p, rootDir), "/")
+		// return strings.TrimPrefix(strings.TrimPrefix(p, rootDir), "/")
+		return p
 	}
 
 	// walk the output directory and compare each file to the input

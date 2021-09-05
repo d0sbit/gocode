@@ -39,11 +39,10 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 ## Notes
 
 TODO:
-* Add remaining methods to get full CRUD
-  - various selects (select, count, select cursor, stream->slice)
-  - tests
-* Implement -dry-run
+* Either simplify the helper functions, or move them to a separate d0sbit repo.
+  Maybe also just a separate file would help keep it organized.
 * Make a punchlist of what is left to round off mongdob
+  - fix bug where subdirs error
   - ensure both the module dir and module dir + "a" both work and are tested
   - fiddle with it a bit from the command line, just make sure it's generally working
 * Then move onto sql version (decide which library to use - sqlx is a decent choice)
@@ -74,6 +73,7 @@ TODO:
 * UI
   - common flags approach so we can communicate to the UI what each program needs
   - diff'ed (dry-run) output
+* Anything we can do about API doc?  Maybe something to generate what Swagger needs?
 
 ---
 

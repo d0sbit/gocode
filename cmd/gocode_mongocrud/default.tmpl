@@ -10,12 +10,7 @@ type Store struct {
 
 {{define "StoreMethods"}}
 import "errors"
-import "reflect"
-import "strings"
-import "fmt"
 import "go.mongodb.org/mongo-driver/mongo"
-import "go.mongodb.org/mongo-driver/bson"
-import "go.mongodb.org/mongo-driver/bson/primitive"
 
 // NewStore returns an initialized Store instance.
 func NewStore(client *mongo.Client, dbName string) (*Store, error) {
@@ -61,6 +56,14 @@ func (e *ErrNotFound) Is(err error) bool {
 func (e *ErrNotFound) HTTPStatusCode() int {
 	return 404
 }
+{{end}}
+
+{{define "MongoUtil"}}
+import "reflect"
+import "strings"
+import "fmt"
+import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/bson/primitive"
 
 func derefedType(o interface{}) reflect.Type {
 	tv := reflect.ValueOf(o)
