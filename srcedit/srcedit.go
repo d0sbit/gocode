@@ -216,7 +216,7 @@ func (p *Package) fileNames() ([]string, error) {
 	}
 	dirEntryList, err := fs.ReadDir(p.outfs, subDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot load from output dir %q (did you forget to create it?): %w", subDir, err)
 	}
 	for _, de := range dirEntryList {
 		if de.IsDir() {
@@ -779,7 +779,7 @@ func (p *Package) findVarOrConstDecl(tok token.Token, withAnyNames []string) (fi
 func (p *Package) FindType(withName string) (ret *TypeInfo, err error) {
 	err = p.load()
 	if err != nil {
-		return
+		return nil, fmt.Errorf("load failed: %w", err)
 	}
 	filename, typeDecl := p.findTypeDecl(withName)
 	if typeDecl == nil {

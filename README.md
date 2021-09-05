@@ -41,8 +41,8 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 TODO:
 * Make a punchlist of what is left to round off mongdob
   - fix bug where subdirs error DONE
-  - ensure both the module dir and module dir + "a" both work and are tested
-  - fiddle with it a bit from the command line, just make sure it's generally working
+  - ensure both the module dir and module dir + "a" both work and are tested DONE
+  - fiddle with it a bit from the command line, just make sure it's generally working FINE FOR NOW
 * Then move onto sql version (decide which library to use - sqlx is a decent choice)
   - with mysql docker test case
   - sort out tx behavior - could have separate Tx method vs not or we could try attaching the tx to the context (actually this moves to the SQL version because no tx in mongo, but attaching to ctx keeps same signature everywhere which is a good thing)

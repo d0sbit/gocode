@@ -41,6 +41,7 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	dryRunF := flagSet.String("dry-run", "off", "Do not apply changes, only output diff of what would change. Value specifies format, 'term' for terminal pretty text, 'html' for HTML, or 'off' to disable.")
 	noGofmtF := flagSet.Bool("no-gofmt", false, "Do not gofmt the output")
 	jsonF := flagSet.Bool("json", false, "Write output as JSON")
+	vF := flagSet.Bool("v", false, "Verbose output")
 	// allF := flagSet.Bool("all", false, "Generate all methods")
 
 	// TODO:
@@ -94,7 +95,9 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	if err != nil {
 		log.Fatalf("error finding module directory: %v", err)
 	}
-	// log.Printf("rootFS=%v; modDir=%v, modPath=%v", rootFS, modDir, modPath)
+	if *vF {
+		log.Printf("rootFS=%v; modDir=%q, packagePath=%q, modPath=%q", rootFS, modDir, packagePath, modPath)
+	}
 	// rootFS is root of filesystem, e.g. corresponding to "/" or `C:\`
 	// modDir is the directory of where to find go.mod, e.g. "projects/somepjt"
 	// modPath is the logical import path as declared in go.mod, e.g. "github.com/example/somepjt"
@@ -125,9 +128,9 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 		outFS = inFS
 	} else {
 		dryRunFS = memfs.New()
-		// FIXME: Package.load() needs to create the directory in the output if it doesn't exist
-		dryRunFS.MkdirAll("a", 0755)
-
+		if packagePath != "" {
+			dryRunFS.MkdirAll(packagePath, 0755)
+		}
 		outFS = dryRunFS
 	}
 
