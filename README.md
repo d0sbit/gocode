@@ -40,7 +40,7 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 
 TODO:
 * Make a punchlist of what is left to round off mongdob
-  - fix bug where subdirs error
+  - fix bug where subdirs error DONE
   - ensure both the module dir and module dir + "a" both work and are tested
   - fiddle with it a bit from the command line, just make sure it's generally working
 * Then move onto sql version (decide which library to use - sqlx is a decent choice)

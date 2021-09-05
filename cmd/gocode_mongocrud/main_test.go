@@ -8,7 +8,9 @@ import (
 	"testing"
 )
 
-func TestMaine(t *testing.T) {
+func TestMaineExec(t *testing.T) {
+
+	// tests with execution of `go test` - requires "docker run ..." etc to work
 
 	var modDir string
 	modDir = t.TempDir()
@@ -106,6 +108,37 @@ type A struct {
 	}
 
 }
+
+func TestMaineOneDir(t *testing.T) {
+
+	// confirm that it works when the package dir is empty
+	// and everything is directly in the module dir
+
+	var modDir string
+	modDir = t.TempDir()
+	// modDir, _ = ioutil.TempDir("", "TestMaine")
+	t.Logf("modDir: %s", modDir)
+	must(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module test1\n"), 0644))
+	must(t, os.WriteFile(filepath.Join(modDir, "types.go"), []byte(`package a
+
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
+type A struct {
+	ID primitive.ObjectID `+"`bson:\"_id\"`"+`
+	Name string `+"`bson:\"name\"`"+`
+}
+`), 0644))
+
+	// run the code generator
+	must(t, os.Chdir(modDir))
+	flset := flag.NewFlagSet(os.Args[0], flag.PanicOnError)
+	ret := maine(flset, []string{"-package=.", "-type=A", "-dry-run=html", "-json"})
+	if ret != 0 {
+		t.Errorf("ret = %d", ret)
+	}
+
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

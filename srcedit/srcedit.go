@@ -53,37 +53,46 @@ func OSWorkingFSDir() (fs.FS, string, error) {
 
 // FindOSWdModuleDir calls OSWorkingFSDir to split up the working dir into a root and path,
 // and then calls FindModuleDir and extracts the module path from go.mod.
-// For example, on Linux the return might be ("/", "home/joe/projects/examplepjt", "github.com/d0sbit/example", nil),
-// or on Windows ("C:\", "user/joe/projects/examplepjt", "github.com/d0sbit/example", nil).
-func FindOSWdModuleDir() (rootFS fs.FS, moduleDir, modulePath string, err error) {
+// The resolve param is a path to resolve from the current working directory into a package subdir path.
+// For example, if you are in /home/joe/project/examplepjt/subpkg and call FindOSWdModuleDir("."),
+// on Linux the return would be ("/", "home/joe/projects/examplepjt", "subpkg", "github.com/d0sbit/example", nil),
+// or on Windows ("C:\", "user/joe/projects/examplepjt", "subpkg", "github.com/d0sbit/example", nil).
+// If resolve is outside of the module directory then an error will be returned.
+func FindOSWdModuleDir(resolve string) (rootFS fs.FS, moduleDir, resolved, modulePath string, err error) {
 
 	fsys, dir, err := OSWorkingFSDir()
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
+
+	r1 := path.Join(dir, resolve)
+	if !strings.HasPrefix(r1, dir) {
+		return nil, "", "", "", fmt.Errorf("resolve path %q is not at or under dir %q", resolve, dir)
+	}
+	resolved = strings.TrimPrefix(strings.TrimPrefix(r1, dir), "/")
 
 	modDir, err := FindModuleDir(fsys, dir)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
 
 	modf, err := fsys.Open(path.Join(modDir, "go.mod"))
 	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to open go.mod: %w", err)
+		return nil, "", "", "", fmt.Errorf("failed to open go.mod: %w", err)
 	}
 	defer modf.Close()
 	b, err := ioutil.ReadAll(modf)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to read go.mod: %w", err)
+		return nil, "", "", "", fmt.Errorf("failed to read go.mod: %w", err)
 	}
 
 	modFile, err := modfile.ParseLax("go.mod", b, nil)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to parse go.mod: %w", err)
+		return nil, "", "", "", fmt.Errorf("failed to parse go.mod: %w", err)
 	}
 	modulePath = modFile.Module.Mod.Path
 
-	return fsys, modDir, modulePath, nil
+	return fsys, modDir, resolved, modulePath, nil
 }
 
 // FindModuleFS will start at startDir and look for a go.mod file
@@ -159,7 +168,7 @@ func NewPackage(infs, outfs fs.FS, modulePath, subDir string) *Package {
 	}
 }
 
-// SubDir returns the subdirectory in which the code lives - "" means it lives directly in the root of the filesystem(s).
+// SubDir returns the subdirectory in which the code lives - "" means it lives directly in the root of the filesystem(s), i.e. directly in the module dir.
 func (p *Package) SubDir() string {
 	return p.subDir
 }
@@ -201,7 +210,11 @@ func (p *Package) fileNames() ([]string, error) {
 
 	retMap := make(map[string]struct{}, 8)
 
-	dirEntryList, err := fs.ReadDir(p.outfs, p.subDir)
+	subDir := "."
+	if p.subDir != "" {
+		subDir = p.subDir
+	}
+	dirEntryList, err := fs.ReadDir(p.outfs, subDir)
 	if err != nil {
 		return nil, err
 	}
@@ -209,15 +222,21 @@ func (p *Package) fileNames() ([]string, error) {
 		if de.IsDir() {
 			continue
 		}
+		if path.Ext(de.Name()) != ".go" {
+			continue
+		}
 		retMap[de.Name()] = struct{}{}
 	}
 
-	dirEntryList, err = fs.ReadDir(p.infs, p.subDir)
+	dirEntryList, err = fs.ReadDir(p.infs, subDir)
 	if err != nil {
 		return nil, err
 	}
 	for _, de := range dirEntryList {
 		if de.IsDir() {
+			continue
+		}
+		if path.Ext(de.Name()) != ".go" {
 			continue
 		}
 		retMap[de.Name()] = struct{}{}

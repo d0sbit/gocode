@@ -37,11 +37,11 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	testFileF := flagSet.String("test-file", "", "Test filename into which to add code, defaults to file with _test.go suffix")
 	storeFileF := flagSet.String("store-file", "store.go", "Filename for the Store type")
 	storeTestFileF := flagSet.String("store-test-file", "store_test.go", "Filename for the Store type tests")
-	packageF := flagSet.String("package", "", "Package or directory to analyze/write to")
+	packageF := flagSet.String("package", "", "Package directory within module to analyze/edit")
 	dryRunF := flagSet.String("dry-run", "off", "Do not apply changes, only output diff of what would change. Value specifies format, 'term' for terminal pretty text, 'html' for HTML, or 'off' to disable.")
 	noGofmtF := flagSet.Bool("no-gofmt", false, "Do not gofmt the output")
 	jsonF := flagSet.Bool("json", false, "Write output as JSON")
-	allF := flagSet.Bool("all", false, "Generate all methods")
+	// allF := flagSet.Bool("all", false, "Generate all methods")
 
 	// TODO:
 	// - -dry-run
@@ -49,8 +49,6 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	// - example command lines
 
 	flagSet.Parse(args)
-
-	_, _, _, _ = typeF, fileF, packageF, allF
 
 	typeName := *typeF
 	if typeName == "" {
@@ -92,24 +90,27 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	// --------------------------------------
 
 	// find go.mod
-	rootFS, modDir, modPath, err := srcedit.FindOSWdModuleDir()
+	rootFS, modDir, packagePath, modPath, err := srcedit.FindOSWdModuleDir(*packageF)
 	if err != nil {
 		log.Fatalf("error finding module directory: %v", err)
 	}
-	log.Printf("rootFS=%v; modDir=%v, modPath=%v", rootFS, modDir, modPath)
+	// log.Printf("rootFS=%v; modDir=%v, modPath=%v", rootFS, modDir, modPath)
+	// rootFS is root of filesystem, e.g. corresponding to "/" or `C:\`
+	// modDir is the directory of where to find go.mod, e.g. "projects/somepjt"
+	// modPath is the logical import path as declared in go.mod, e.g. "github.com/example/somepjt"
 
-	// convert package into a path relative to go.mod
-	packagePath := *packageF
-	if strings.HasPrefix(packagePath, ".") {
-		// FIXME: we should make this work - need to resolve the path and then
-		// make it relative to module directory
-		log.Fatalf("relative package path %q not supported (yet)", packagePath)
-	}
-	if packagePath == "" {
-		log.Fatal("-package is required")
-	}
+	// // convert package into a path relative to go.mod
+	// packagePath := *packageF
+	// if strings.HasPrefix(packagePath, ".") {
+	// 	// FIXME: we should make this work - need to resolve the path and then
+	// 	// make it relative to module directory
+	// 	log.Fatalf("relative package path %q not supported (yet)", packagePath)
+	// }
+	// if packagePath == "" {
+	// 	log.Fatal("-package is required")
+	// }
 
-	log.Printf("packagePath (subdir): %s", packagePath)
+	// log.Printf("packagePath (subdir): %s", packagePath)
 
 	// set up file systems
 	inFS, err := fs.Sub(rootFS, modDir)

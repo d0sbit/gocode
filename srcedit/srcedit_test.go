@@ -28,7 +28,7 @@ func TestOSWorkingFSDir(t *testing.T) {
 
 func TestFindOSWdModuleDir(t *testing.T) {
 
-	fsys, modDir, modPath, err := FindOSWdModuleDir()
+	fsys, modDir, _, modPath, err := FindOSWdModuleDir("")
 	if err != nil {
 		t.Fatal(err)
 	}
