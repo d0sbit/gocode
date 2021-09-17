@@ -1,0 +1,1082 @@
+{{define "Migrations"}}
+import (
+    "embed"
+    
+    "github.com/pressly/goose/v3"
+)
+
+//go:embed *.sql
+var embedMigrations embed.FS
+
+func init() {
+	goose.SetBaseFS(embedMigrations)
+}
+{{end}}
+
+{{define "Store"}}
+import "database/sql"
+import "github.com/jmoiron/sqlx"
+import _ "github.com/go-sql-driver/mysql"
+
+// Store has overall connection information shared by each specific type's store.
+type Store struct {
+	db *sql.DB
+	dbx *sqlx.DB
+	driverName string
+}
+{{end}}
+
+{{define "StoreMethods"}}
+import "errors"
+import "database/sql"
+import "github.com/jmoiron/sqlx"
+import "context"
+
+
+// NewStore returns an initialized Store instance.
+func NewStore(db *sql.DB, driverName string) (*Store, error) {
+	if driverName == "" {
+		return nil, errors.New("driverName is required")
+	}
+	dbx := sqlx.NewDb(db, driverName)
+	ret := Store {
+		db: db,
+		dbx: dbx,
+		driverName: driverName,
+	}
+	return &ret, nil
+}
+
+// BeginTxx starts a transaction and returns a context with an associated transaction.
+// It will error if a transaction is already in progress for the context.
+func (s *Store) BeginTxx(ctx context.Context) (context.Context, *sqlx.Tx, error) {
+	ctx, tx, txCreated, err := s.ctxTx(ctx)
+	if err != nil {
+		return ctx, tx, err
+	}
+	if !txCreated {
+		return ctx, nil, errors.New("(BeginTxx) tx already in progress")
+	}
+	return ctx, tx, nil
+}
+
+// RunTx will call the function f with a transaction associated with the context.
+// If f returns an error, then the transaction is rolled back, otherwise it is committed.
+// It will error if a transaction is already in progress for the context.
+func (s *Store) RunTx(ctx context.Context, f func(ctx context.Context) error) error {
+	ctx, tx, txCreated, err := s.ctxTx(ctx)
+	if err != nil {
+		return err
+	}
+	if !txCreated {
+		return errors.New("(RunTx) tx already in progress")
+	}
+	defer tx.Rollback()
+	err = f(ctx)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ctxTx will return an existing transaction associated with a context,
+// or create a new one and return a context with the association.
+func (s *Store) ctxTx(ctx context.Context) (rctx context.Context, tx *sqlx.Tx, txCreated bool, rerr error) {
+	tx, ok := ctx.Value(ctxTxSqlxTx).(*sqlx.Tx)
+	if ok {
+		return ctx, tx, false, nil
+	}
+	var err error
+	tx, err = s.dbx.BeginTxx(ctx, nil)
+	if err != nil {
+		return ctx, tx, true, err
+	}
+	ctx = context.WithValue(ctx, ctxTxSqlxTx, tx)
+	return ctx, tx, true, nil
+}
+
+type ctxTxKey string
+
+const ctxTxSqlxTx = ctxTxKey("sqlx.Tx")
+
+// ErrNotFound provides an explicit type for the not found case,
+// intended to wrap database-specific error(s).
+type ErrNotFound struct {
+	err error
+}
+
+// Error implements the error interface.
+func (e *ErrNotFound) Error() string {
+	if e.err == nil {
+		return "not found"
+	}
+	return "not found: " + e.err.Error()
+}
+
+// Unwrap supports error wrapping.
+func (e *ErrNotFound) Unwrap() error { return e.err }
+
+// Is returns true if the specified error is also a *ErrNotFound
+func (e *ErrNotFound) Is(err error) bool {
+	_, ok := err.(*ErrNotFound)
+	return ok
+}
+
+// HTTPStatusCode tells HTTP handler methods that 404 is the status corresponding to this error.
+// Individual handlers can decide to honor this and send back in response or not.
+func (e *ErrNotFound) HTTPStatusCode() int {
+	return 404
+}
+{{end}}
+
+{{define "SQLUtil"}}
+import "strings"
+import "reflect"
+import "time"
+import "crypto/rand"
+import "github.com/oklog/ulid"
+
+func IDString() string {
+	return ulid.MustNew(uint64(time.Now().UnixNano() / int64(time.Millisecond)), rand.Reader).String()
+}
+
+type idAssigner interface {
+	IDAssign()
+}
+
+func idAssign(o interface{}) {
+	if i, ok := o.(idAssigner); ok {
+		i.IDAssign()
+	}
+}
+
+type createTimeToucher interface {
+	CreateTimeTouch()
+}
+
+func createTimeTouch(o interface{}) {
+	if i, ok := o.(createTimeToucher); ok {
+		i.CreateTimeTouch()
+	}
+}
+
+type updateTimeToucher interface {
+	UpdateTimeTouch()
+}
+
+func updateTimeTouch(o interface{}) {
+	if i, ok := o.(updateTimeToucher); ok {
+		i.UpdateTimeTouch()
+	}
+}
+
+type storeValidator interface {
+	StoreValidate() error
+}
+
+func storeValidate(o interface{}) error {
+	if i, ok := o.(storeValidator); ok {
+		return i.StoreValidate()
+	}
+	return nil
+}
+
+// TODO: remove and replace calls with deref
+func derefedType(o interface{}) reflect.Type {
+	tv := reflect.ValueOf(o)
+	for tv.Kind() == reflect.Ptr {
+		tv = tv.Elem()
+	}
+	return tv.Type()
+}
+
+func deref(o interface{}) reflect.Value {
+	tv := reflect.ValueOf(o)
+	for tv.Kind() == reflect.Ptr {
+		tv = tv.Elem()
+	}
+	return tv
+}
+
+// dbFieldNames returns a slice of string containing the names
+// from "db" struct tags.  The except strings will be checked
+// and any matching field there will be omitted from the return.
+func dbFieldNames(o interface{}, except...string) []string {
+
+	exceptMatch := func(n string) bool {
+		for _, en := range except {
+			if n == en {
+				return true
+			}
+		}
+		return false
+	}
+
+	v := deref(o)
+	t := v.Type()
+
+	ret := make([]string, 0, t.NumField())
+
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		dbTag := f.Tag.Get("db")
+		dbName := strings.Split(dbTag, ",")[0]
+		if len(dbName) > 0 && dbName != "-" && !exceptMatch(dbName) {
+			ret = append(ret, dbName)
+		}
+		// recurse into structs with no db name
+		if len(dbName) == 0 && f.Type.Kind() == reflect.Struct {
+			ret = append(ret, dbFieldNames(v.Field(i).Interface(), except...)...)
+		}
+	}
+
+	return ret
+}
+
+// dbFieldStrings works like dbFieldNames but returns str for each
+// instead of the field name.  Useful for returning series of "?" in a SQL query.
+func dbFieldStrings(o interface{}, str string, except...string) []string {
+
+	nl := dbFieldNames(o, except...)
+
+	ret := make([]string, 0, len(nl))
+	for range nl {
+		ret = append(ret, str)
+	}
+
+	return ret
+}
+
+// dbFieldValue returns the value of the struct field
+// with db tag k, or nil if no such field
+func dbFieldValue(o interface{}, k string) interface{} {
+	v := reflect.ValueOf(o)
+	for v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		dbName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
+		if dbName == "" || dbName == "-" {
+			continue
+		}
+		if dbName == k {
+			return v.Field(i).Interface()
+		}
+	}
+	return nil
+}
+
+func dbFieldQuote(n []string) []string {
+	ret := make([]string, 0, len(n))
+	for _, nv := range n {
+		ret = append(ret, "`" + nv + "`")
+	}
+	return ret
+}
+
+func stringsPrefix(n []string, pfx string) []string {
+	ret := make([]string, 0, len(n))
+	for _, nv := range n {
+		ret = append(ret, pfx + nv)
+	}
+	return ret
+}
+
+/*
+import "reflect"
+import "strings"
+import "fmt"
+import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
+func derefedType(o interface{}) reflect.Type {
+	tv := reflect.ValueOf(o)
+	for tv.Kind() == reflect.Ptr {
+		tv = tv.Elem()
+	}
+	return tv.Type()
+}
+
+// isValidMongoOp returns true if the string is one of the operators we allow when querying
+func isValidMongoOp(v string) bool {
+	switch v {
+	case "$eq", "$gt", "$gte", "$lt", "$lte", "$in", "$ne", "$nin", // usual binary operators
+		"$and", "$not", "$nor", "$or", // boolean
+		"$mod", "$exists", "$type", "$all", "$size": // other
+		return true
+	}
+	return false
+}
+
+// bsonField returns the field with a bson struct tag with the name v in type t.
+// t must correspond to a struct type.  Returns nil if not found
+func bsonField(t reflect.Type, k string) *reflect.StructField {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		bsonName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
+		if bsonName == "" || bsonName == "-" {
+			continue
+		}
+		if bsonName == k {
+			return &f
+		}
+	}
+	return nil
+}
+
+// bsonFieldValue returns the value of the struct field
+// with bson tag k, or nil if no such field
+func bsonFieldValue(o interface{}, k string) interface{} {
+	v := reflect.ValueOf(o)
+	for v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		bsonName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
+		if bsonName == "" || bsonName == "-" {
+			continue
+		}
+		if bsonName == k {
+			return v.Field(i).Interface()
+		}
+	}
+	return nil
+}
+
+func mongoFixInputValue(v interface{}, t reflect.Type, k string) (interface{}, error) {
+	bf := bsonField(t, k)
+	if bf == nil {
+		return nil, fmt.Errorf("invalid field name %q", k)
+	}
+	var id primitive.ObjectID
+	if bf.Type.AssignableTo(reflect.TypeOf(id)) {
+		id, err := primitive.ObjectIDFromHex(fmt.Sprint(v))
+		return id, err
+	}
+	return v, nil
+}
+
+// mongoSort returns a bson.D appropriate for a mongo query given the specified input.
+// sort indicates the sorting and o is the object to check for fields on.
+// The sort can either be a slice of strings, or a slice of map[string]interface{},
+// with the values being either 1 or -1 (float64 or int underlying type).
+// Note that each map must only contain a single entry - this is due to the fact that
+// maps in Go do not have an explicit order.
+// Any other input varation will error.
+func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
+
+	typo := derefedType(o)
+
+	ret = make(bson.D, 0, len(sort))
+
+	for _, v := range sort {
+		switch vt := v.(type) {
+		case string: // string by itself means sort ascending
+			if bsonField(typo, vt) == nil {
+				return nil, fmt.Errorf("invalid field name %q", v)
+			}
+			ret = append(ret, primitive.E{Key:vt, Value:1})
+		case map[string]interface{}:
+			if len(vt) != 1 {
+				return nil, fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(vt))
+			}
+			for k, n := range vt {
+				if bsonField(typo, k) == nil {
+					return nil, fmt.Errorf("invalid field name (2) %q", k)
+				}
+				ns := fmt.Sprint(n)
+				switch ns {
+				case "1":
+					ret = append(ret, primitive.E{Key:k, Value:1})
+				case "-1":
+					ret = append(ret, primitive.E{Key:k, Value:-1})
+				default:
+					return nil, fmt.Errorf("invalid sort order %q for field %q", ns, k)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("unknown type %T found in sort order", v)
+		}
+	}
+
+	return ret, nil
+}
+
+// mongoFilter returns a value appropriate for a mongo query given the specified input.
+// The filter must be a map with field names as keys and the values must be either appropriate
+// primitive types or another map with a supported operator.  This simplification of the mongo
+// query syntax allows us to vet the input as well as handle type conversions for field types
+// that don't have a corresponding JSONizable representation.
+// isValidMongoOp and bsonField are used to verify map keys and thus avoid allowing
+// unintended functionality.
+// o is the object to check for fields against.
+func mongoFilter(filter map[string]interface{}, o interface{}) (ret bson.D, err error) {
+
+	typo := derefedType(o)
+
+	ret = make(bson.D, 0, len(filter)) // mongo driver barfs with nil bson.D
+
+floop:
+	for k, v := range filter {
+		if bsonField(typo, k) == nil {
+			return nil, fmt.Errorf("invalid filter key %q", k)
+		}
+		switch tv := v.(type) {
+		case float64, float32, int, int32, int64, string:
+			v2, err := mongoFixInputValue(v, typo, k)
+			if err != nil {
+				return nil, err
+			}
+			ret = append(ret, bson.E{Key:k, Value:v2})
+			continue floop
+		case map[string]interface{}:
+			if len(tv) != 1 {
+				return nil, fmt.Errorf("nested maps must only have one entry, key %q", k)
+			}
+			for subk, subv := range tv { // executes exactly once
+				if !isValidMongoOp(subk) {
+					return nil, fmt.Errorf("invalid key %q.%q in nesetd map", k, subk)
+				}
+				switch subvv := subv.(type) {
+				case float64, float32, int, int32, int64, string:
+					v2, err := mongoFixInputValue(subvv, typo, k)
+					if err != nil {
+						return nil, err
+					}
+					ret = append(ret, bson.E{Key:k, Value:bson.D{bson.E{Key:subk, Value:v2}}})
+					continue floop
+				}
+			}
+		}
+	}
+
+	return ret, nil
+}
+*/
+{{end}}
+
+{{define "TestStore"}}
+import (
+	"testing"
+	"fmt"
+    "os/exec"
+	"bytes"
+	"strings"
+	"strconv"
+	"math/rand"
+	"database/sql"
+	"time"
+	"net"
+	
+	{{if .MigrationsImportPath}}
+	_ "{{.MigrationsImportPath}}"
+	{{end}}
+
+	"github.com/pressly/goose/v3"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+// TestMain starts a shared mysql docker container for the rest of the tests in this package to use.
+func TestMain(m *testing.M) {
+
+	testMysql = startMysql(nil)
+	defer testMysql.Close()
+	err := testMysql.ping(time.Second * 20)
+	if err != nil {
+		panic(err)
+	}
+
+	m.Run()
+
+	// don't call os.Exit here because we want the defer to run
+	return
+}
+
+// newTestStore returns a new Store instance connected to a random database name,
+// with migrations applied.
+func newTestStore(t *testing.T) *Store {
+
+	chkerr := func(err error) {
+		if err != nil {
+			if t != nil {
+				t.Helper()
+				t.Fatal(err)
+			}
+			panic(err)
+		}
+	}
+
+	// connect to the default db and issue the CREATE DATABASE command for our random db name
+	mdb, err := sql.Open("mysql", testMysql.DSN("mysql"))
+	chkerr(err)
+	defer mdb.Close()
+	dbName := testMysql.RandDBName()
+	_, err = mdb.Exec(`CREATE DATABASE `+"`"+dbName+"`")
+	chkerr(err)
+
+	db, err := sql.Open("mysql", testMysql.DSN(dbName))
+	chkerr(err)
+
+	// close connection pool at end of test
+	t.Cleanup(func() {
+		_, err := db.Exec(`DROP DATABASE `+"`"+dbName+"`")
+		if err != nil {
+			fmt.Printf("error during DROP DATABASE on %q: %v", dbName, err)
+		}
+		db.Close()
+	})
+
+	// run migrations
+	chkerr(goose.SetDialect("mysql"))
+	chkerr(goose.Up(db, "."))
+
+	store, err := NewStore(db, "mysql")
+	chkerr(err)
+
+	return store
+}
+
+var testMysql *tmysql
+
+type tmysql struct {
+	dsnFmt string
+	dockerID string
+}
+
+// ping tries to connect and ping the "mysql" database until the specified time expires.
+func (tm *tmysql) ping(timeout time.Duration) error {
+	start := time.Now()
+	// try a raw TCP connect first - to avoid the "unexpected EOF" messages from the mysql driver
+	for time.Since(start) < timeout {
+		//conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", "127.0.0.1:13306")
+		conn, err := net.Dial("tcp", "127.0.0.1:13306")
+		if err != nil {
+			time.Sleep(time.Second * 1)
+			continue
+		}
+		err = func() error {
+			defer conn.Close()
+			b := make([]byte, 1)
+			_, err = conn.Read(b)
+			return err
+		}()
+		if err != nil {
+			time.Sleep(time.Second * 1)
+			continue
+		}
+		//time.Sleep(time.Second * 1)
+		break
+	}
+	mdb, err := sql.Open("mysql", tm.DSN("mysql"))
+	if err != nil {
+		return err // this should only error if the DSN is a bad format
+	}
+	defer mdb.Close()
+	for time.Since(start) < timeout {
+		err = mdb.Ping()
+		fmt.Printf("Ping returned: %v", err)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(time.Second * 1)
+	}
+	return err
+}
+
+// DSN returns a new mysql connection data source name for a specific database name.
+func (tm *tmysql) DSN(dbName string) string {
+	dsn := fmt.Sprintf(tm.dsnFmt, dbName)
+	fmt.Printf("DSN: %s\n", dsn)
+	return dsn
+}
+
+// RandDBName generates a random database (schema) name for use in testing.
+func (tm *tmysql) RandDBName() string {
+	return "gotest_"+strconv.FormatUint(rand.Uint64(), 16)
+}
+
+func (tm *tmysql) Close() error {
+	cmd := exec.Command("docker", "stop", tm.dockerID)
+	b, err := cmd.CombinedOutput()
+	if len(bytes.TrimSpace(b)) > 0 {
+		fmt.Printf("docker stop output:\n%s", b)
+	}
+	return err
+}
+
+func startMysql(t *testing.T) *tmysql {
+	// TODO: it would be better if while it was downloading the image, etc. that output piped through so user can see
+	// TODO: figure out automatically selecting a free port
+	cmd := exec.Command("docker", "run", "--rm", "-d", "-p", "13306:3306", "-e", "MYSQL_ROOT_PASSWORD=gotest", "mysql:latest")
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		if t != nil {
+			t.Logf("output: %s", b)
+			t.Fatal(err)
+		}
+		fmt.Printf("output: %s", b)
+		panic(err)
+	}
+	dockerID := strings.TrimSpace(string(b))
+	
+	// FIXME: there are probably useful connection options like
+	// picking a good charset, etc.
+	return &tmysql {
+		dsnFmt: "root:gotest@tcp(127.0.0.1:13306)/%s",
+		dockerID: dockerID,
+	}
+}
+{{end}}
+
+{{define "TYPEStore"}}
+// {{$.Struct.LocalName}}Store has mongodb storage methods for this type.
+type {{$.Struct.LocalName}}Store struct {
+	*Store // embed store for easy access
+}
+{{end}}
+
+{{define "TYPEStoreMethods"}}
+
+// {{$.Struct.LocalName}} returns a {{$.Struct.LocalName}}Store for accessing this type.
+func (s *Store) {{$.Struct.LocalName}}() *{{$.Struct.LocalName}}Store {
+	return &{{$.Struct.LocalName}}Store{Store:s}
+}
+
+// tableName returns the name of the table.
+func (s *Store) tableName() string {
+	return "{{LowerForType $.Struct.LocalName "_"}}"
+}
+
+{{/* following are not TYPEStore methods but it seems the best place to put this stuff for now */}}
+
+// {{$.Struct.LocalName}}List is a slice of {{$.Struct.QName}} with relevant methods.
+type {{$.Struct.LocalName}}List []{{$.Struct.QName}}
+
+// {{$.Struct.LocalName}}Result implements {{$.Struct.LocalName}}Resulter by adding
+// to the slice.
+func (l *{{$.Struct.LocalName}}List) {{$.Struct.LocalName}}Result(o {{$.Struct.QName}}) error {
+	*l = append(*l, o)
+	return nil
+}
+
+{{/* NOTE: Resulters get their result passeed by value so the caller doesn't hang onto
+a pointer to an instance that might be overwritten; and it provides allocation optimization
+opportunities. */}}
+// {{$.Struct.LocalName}}Resulter can receive {{$.Struct.QName}} instances as they 
+// are streamed from the underlying data source.
+type {{$.Struct.LocalName}}Resulter interface {
+	{{$.Struct.LocalName}}Result({{$.Struct.QName}}) error
+}
+
+// {{$.Struct.LocalName}}ResulterFunc allows implementation of {{$.Struct.QName}}Resulter as a function.
+type {{$.Struct.LocalName}}ResulterFunc func(o {{$.Struct.QName}}) error
+
+// {{$.Struct.LocalName}}ResulterFunc implements {{$.Struct.LocalName}}Resulter by calling f.
+func (f {{$.Struct.LocalName}}ResulterFunc) {{$.Struct.LocalName}}Result(o {{$.Struct.QName}}) error {
+	return f(o)
+}
+
+{{end}}
+
+{{define "TYPEInsert"}}
+import "context"
+import "strings"
+
+// Insert will insert a record.
+func (s *{{$.Struct.LocalName}}Store) Insert(ctx context.Context, o *{{$.Struct.QName}}) error {
+	{{$idf := index $.Struct.FieldList.PK 0}}
+	idAssign(o)
+	createTimeTouch(o)
+	updateTimeTouch(o)
+	if err := storeValidate(o); err != nil {
+		return err
+	}
+	ctx, tx, txCreated, err := s.ctxTx(ctx)
+	if err != nil {
+		return err
+	}
+	if txCreated {
+		defer tx.Rollback()
+	}
+	sqlText := "INSERT INTO `" + s.tableName() + "` "+
+		"(" + strings.Join(dbFieldQuote(dbFieldNames(o)), ",") + ") VALUES "+
+		"(" + strings.Join(stringsPrefix(dbFieldNames(o), ":"), ",") + ")"
+	res, err := tx.NamedExec(sqlText, o)
+	if err != nil {
+		return err
+	}
+	{{if $.Struct.IsPKAutoIncr}}
+	id, err := res.LastInsertId()
+	if err == nil {
+		o.{{$idf.GoName}} = id
+	}
+	{{else}}
+	_ = res
+	{{end}}
+	if txCreated {
+		return tx.Commit()
+	}
+	return nil
+}
+{{end}}
+
+{{define "TYPEDelete"}}
+import "context"
+import "go.mongodb.org/mongo-driver/bson"
+
+// Delete removes a the indicated record.
+func (s *{{$.Struct.LocalName}}Store) Delete(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) error {
+	_, err := s.col().DeleteOne(ctx, bson.D{ {{range $.Struct.FieldList.PK}}
+		{"{{.TagFirst "db"}}", v{{.GoName}}},
+	{{end}}
+    })
+	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
+		err = &ErrNotFound{err: err}
+	}
+	return err
+}
+{{end}}
+
+{{define "TYPEUpdate"}}
+import "context"
+import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
+// Update overwrites an existing record.
+func (s *{{$.Struct.LocalName}}Store) Update(ctx context.Context, o *{{$.Struct.QName}}) error {
+	{{$idf := index $.Struct.FieldList.PK 0}}
+	_, err := s.col().UpdateOne(ctx,
+		bson.D{ {{range $.Struct.FieldList.PK}}
+			{"{{.TagFirst "db"}}", o.{{.GoName}}},
+		{{end}} },
+		bson.D{ {"$set", o} },
+	)
+	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
+		err = &ErrNotFound{err: err}
+	}
+	return err
+}
+{{end}}
+
+{{define "TYPESelectByID"}}
+import "context"
+import "errors"
+import "strings"
+import "database/sql"
+
+// SelectByID returns the matching record by primary key.
+func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) (*{{$.Struct.QName}}, error) {
+	var ret {{$.Struct.QName}}
+	ctx, tx, txCreated, err := s.ctxTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if txCreated {
+		defer tx.Rollback()
+	}
+	sqlText := "SELECT " + strings.Join(dbFieldQuote(dbFieldNames(&ret)), ",") + 
+		" FROM `" + s.tableName() + "` WHERE " + strings.Join([]string { {{range $.Struct.FieldList.PK}}
+		" `{{.TagFirst "db"}}` = ?",{{end}}
+	}, ",")
+	err = tx.Get(&ret, sqlText, {{range $.Struct.FieldList.PK}}v{{.GoName}},{{end}})
+	if err != nil && errors.Is(err, sql.ErrNoRows) {
+		err = &ErrNotFound{err: err}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if txCreated {
+		return &ret, tx.Commit()
+	}
+	return &ret, err
+}
+{{end}}
+
+{{define "TYPESelect"}}
+import "errors"
+
+//import "log"
+//var _ log.Logger  // tmp
+
+// Select runs the indicated query and loads it's return into result.
+// TODO: explain args
+// Note that for more complex query needs it is recommended you add a custom select function
+// instead of trying to adapt this one to every use case.
+func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit int64, critiera map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) error {
+
+	if result == nil {
+		return errors.New("result must not be nil")
+	}
+
+	var v {{$.Struct.LocalName}}
+
+	filter, err := mongoFilter(critiera, &v)
+	if err != nil {
+		return err
+	}
+	sort, err := mongoSort(orderBy, &v)
+	if err != nil {
+		return err
+	}
+
+	cursor, err := s.col().Find(ctx, filter, &options.FindOptions{ Limit: &limit, Skip: &offset, Sort: sort })
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		v = {{$.Struct.LocalName}} {}
+		err := cursor.Decode(&v)
+		if err != nil {
+			return err
+		}
+		err = result.{{$.Struct.LocalName}}Result(v)
+		if err != nil {
+			return err
+		}
+	}
+
+	return cursor.err()
+}
+{{end}}
+
+{{define "TYPESelectCursor"}}
+import "encoding/json"
+import "encoding/base64"
+import "fmt"
+//import "log"
+
+//var _ log.Logger
+
+// SelectCursor is similar to Select but instead of specifying an offset and limit it uses a cursor.
+// Useful for iterating over large datasets where computing the total size or ...
+// TODO: explain args
+// Note that for more complex query needs it is recommended you add a custom select function
+// instead of trying to adapt this one to every use case.
+func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit int64, cursor string, criteria map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) (nextCursor string, err error) {
+
+	if cursor != "" {
+		cursorj, err := base64.RawURLEncoding.DecodeString(cursor)
+		if err != nil {
+			return "", fmt.Errorf("cursor decode error: %w", err)
+		}
+		cspec := make(map[string]interface{})
+		err = json.Unmarshal(cursorj, &cspec)
+		if err != nil {
+			return "", fmt.Errorf("cursor unmarshal error: %w", err)
+		}
+		n := 0
+		ncriteria := make(map[string]interface{}, len(criteria))
+		for k, v := range criteria {
+			ncriteria[k] = v
+		}
+		for k, v := range cspec {
+			n++
+			if _, exists := ncriteria[k]; exists {
+				return "", fmt.Errorf("criteria contains cursor field %q", k)
+			}
+			if n == len(cspec) {
+				ncriteria[k] = map[string]interface{}{"$gt":v}
+			} else {
+				ncriteria[k] = map[string]interface{}{"$gte":v}
+			}
+		}
+		criteria = ncriteria
+	}
+
+	rcount := 0
+	cout := make(map[string]interface{}, len(orderBy))
+	r2 := {{$.Struct.LocalName}}ResulterFunc(func(o {{$.Struct.QName}}) error {
+		rcount++
+		for _, ov := range orderBy {
+			switch ov2 := ov.(type) {
+			case string:
+				cout[ov2] = bsonFieldValue(o, ov2)
+			case map[string]interface{}:
+				for k := range ov2 {
+					//cout[k] = map[string]interface{}{
+					cout[k] = bsonFieldValue(o, k)
+				}
+			default:
+				return fmt.Errorf("unknown type in orderBy entry %T", ov)
+			}
+		}
+		return result.{{$.Struct.LocalName}}Result(o)
+	})
+	//log.Printf("criteria: %#v", criteria)
+	//log.Printf("orderBy: %#v", orderBy)
+	err = s.Select(ctx, 0, limit, criteria, orderBy, &r2)
+	if err != nil {
+		return "", err
+	}
+	
+	// if no results, then return the same cursor (at end of list)
+	if rcount == 0 {
+		return cursor, nil
+	}
+
+	cursorb, err := json.Marshal(cout)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(cursorb), nil
+}
+{{end}}
+
+{{define "TYPECount"}}
+// Count returns the count of the result of the indicated query.
+func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[string]interface{}) (int64, error) {
+	var v {{$.Struct.LocalName}}
+	filter, err := mongoFilter(critiera, &v)
+	if err != nil {
+		return 0, err
+	}
+	return s.col().CountDocuments(ctx, filter)
+}
+{{end}}
+
+{{define "TestTYPE"}}
+import "testing"
+import "context"
+//import "errors"
+
+func Test{{$.Struct.LocalName}}CRUD(t *testing.T) {
+	
+	{{$idf := index $.Struct.FieldList.PK 0}}
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	o := {{$.Struct.LocalName}}{}
+	err := store.{{$.Struct.LocalName}}().Insert(ctx, &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := o.{{$idf.GoName}}
+
+	t.Logf("ID: %v", id)
+
+	o2, err := store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.{{$idf.GoName}} != o2.{{$idf.GoName}} {
+		t.Errorf("mismatched IDs, expected: %v, actual: %v", o.{{$idf.GoName}}, o2.{{$idf.GoName}})
+	}
+
+	/*
+	err = store.{{$.Struct.LocalName}}().Update(ctx, o2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.{{$.Struct.LocalName}}().Delete(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
+	var errNotFound *ErrNotFound
+	if !(err != nil && errors.As(err, &errNotFound)) {
+		t.Errorf("unexpected select result after delete: %v", err)
+	}
+	*/
+
+}
+
+/*
+func Test{{$.Struct.LocalName}}Select(t *testing.T) {
+	
+	{{$idf := index $.Struct.FieldList.PK 0}}
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	var err error
+	var result {{$.Struct.LocalName}}List
+
+	var records [5]{{$.Struct.LocalName}}
+	for i := range records {
+		records[i] = {{$.Struct.QName}}{}
+		err := store.{{$.Struct.LocalName}}().Insert(ctx, &records[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	count, err := store.{{$.Struct.LocalName}}().Count(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(count) != len(records) {
+		t.Errorf("unexpected Count(): %d", count)
+	}
+
+	result = nil
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, nil, []interface{}{"_id"}, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 2 {
+		t.Errorf("unexpected result length %d", len(result))
+	}
+
+	result = nil
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 0, nil, []interface{}{"_id"}, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 5 {
+		t.Errorf("unexpected result length %d", len(result))
+	}
+}
+
+func Test{{$.Struct.LocalName}}SelectCursor(t *testing.T) {
+	
+	{{$idf := index $.Struct.FieldList.PK 0}}
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	var err error
+	var result {{$.Struct.LocalName}}List
+
+	var records [5]{{$.Struct.LocalName}}
+	for i := range records {
+		records[i] = {{$.Struct.QName}}{}
+		err := store.{{$.Struct.LocalName}}().Insert(ctx, &records[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cursor := ""
+	result = nil
+	loopCount := 0
+	for i := 0; i < 10; i++{
+		var nextRes {{$.Struct.LocalName}}List
+		cursor, err = store.{{$.Struct.LocalName}}().SelectCursor(ctx, 2, cursor, nil, []interface{}{"_id"}, &nextRes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		//t.Logf("cursor: %q", cursor)
+		result = append(result, nextRes...)
+		if len(nextRes) == 0 {
+			break
+		}
+		loopCount++
+	}
+
+	if len(result) != 5 {
+		t.Errorf("unexpected result length %d", len(result))
+	}
+	if loopCount != 3 {
+		t.Errorf("unexpected loopCount %d", loopCount)
+	}
+}
+*/
+{{end}}

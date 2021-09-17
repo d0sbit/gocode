@@ -58,6 +58,11 @@ func (dir DirFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	return os.WriteFile(fullPath, data, perm)
 }
 
+// MkdirAll calls os.MkdirAll with the appropriate prefix.
+func (dir DirFS) MkdirAll(path string, perm os.FileMode) error {
+	return os.MkdirAll(filepath.Join(string(dir), path), perm)
+}
+
 // Sub implements fs.SubFS, so we can return an instance that still implements WriteFile.
 func (dir DirFS) Sub(subDir string) (fs.FS, error) {
 	if !fs.ValidPath(subDir) {

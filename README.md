@@ -39,15 +39,34 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 ## Notes
 
 TODO:
-* Make a punchlist of what is left to round off mongdob
-  - fix bug where subdirs error DONE
-  - ensure both the module dir and module dir + "a" both work and are tested DONE
-  - fiddle with it a bit from the command line, just make sure it's generally working FINE FOR NOW
-* Then move onto sql version (decide which library to use - sqlx is a decent choice)
-  - with mysql docker test case
-  - sort out tx behavior - could have separate Tx method vs not or we could try attaching the tx to the context (actually this moves to the SQL version because no tx in mongo, but attaching to ctx keeps same signature everywhere which is a good thing)
+* sqlcrud mvp:
+  - set up test harness so we can run through tmpl generation DONE (COMPILES)
+  - debug mysql startup/connection DONE
+  - get pressly goose migrations working
+    - add option to specify migrations package, with appropriate default logic ("migrations" next to the store folder) DONE
+    - make template for go file generation with example from https://github.com/pressly/goose#embedded-sql-migrations (SetBaseFS goes in init()) DONE
+    - add logic to create one empty migration file if no files in migration dir DONE
+    - main_test.go needs to include writing a table migration file, just like it writes types.go DONE
+    - update test to emit the correct import and call goose.Up() (after each db create) DONE
+  - mysql docker test case DONE
+  - write out crud templates using sqlx
+    - Insert DONE
+    - SelectByID DONE
+    - DeleteByID
+    - Update
+    - Select
+    - Count
+    - SelectCursor
+    - separate transaction test case
+  - attach tx to context
+  - punchlist
+  - implement helpers in mongocrud (maybe move to backlog)
+  	- idAssign
+	  - createTimeTouch
+	  - updateTimeTouch
+	  - storeValidate
 * Handlers
-  - see if we can expression permissions with a super simple interface abstraction, e.g. CanRead(interface{}) bool, etc.
+  - see if we can express permissions with a super simple interface abstraction, e.g. CanRead(interface{}) bool, etc.
     it should be optional, but could let us have perms from the get-go without
   - both PUT and PATCH support
   - querying should default to "normal" way but have a few lines of commented code to switch to cursor
@@ -68,9 +87,11 @@ TODO:
       - if err is nil then don't log
       - if responseFormat is "" then don't write to output
 * Decide what we want to do about main program, need at least something for that
+* Implement custom template support - ideally an option would write the default template (files) to a well-known location and it could be edited frmo there.
 * UI
   - common flags approach so we can communicate to the UI what each program needs
   - diff'ed (dry-run) output
+* Clean up main README and make some decent exampels of how to use
 * Anything we can do about API doc?  Maybe something to generate what Swagger needs?
 
 ---

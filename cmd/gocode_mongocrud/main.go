@@ -16,9 +16,11 @@ import (
 	"github.com/psanford/memfs"
 
 	"github.com/d0sbit/gocode/srcedit"
+	"github.com/d0sbit/gocode/srcedit/diff"
+	"github.com/d0sbit/gocode/srcedit/model"
 )
 
-//go:embed default.tmpl
+//go:embed mongocrud.tmpl
 var defaultTmplFS embed.FS
 
 func main() {
@@ -145,23 +147,37 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	// log.Printf("typeInfo=%v", typeInfo)
 
 	// populate Struct
-	s := Struct{
-		pkgImportedName: "", // TOOD: figure out what to do with prefixed types (not in the same package)
-		name:            typeName,
-		typeInfo:        typeInfo,
-	}
-	s.fields, err = s.makeFields()
+	// s := Struct{
+	// 	pkgImportedName: "",
+	// 	name:            typeName,
+	// 	typeInfo:        typeInfo,
+	// }
+	// s.fields, err = s.makeFields()
+	// if err != nil {
+	// 	log.Fatalf("failed to extract field info from type %q: %v", typeName, err)
+	// }
+
+	// TOOD: figure out what to do with prefixed types (not in the same package)
+	s, err := model.NewStruct(typeInfo, "")
 	if err != nil {
-		log.Fatalf("failed to extract field info from type %q: %v", typeName, err)
+		log.Fatalf("failed to find type %q: %v", typeName, err)
 	}
+	// TODO: add back in check for bson field on pks
+	// for _, pkf := range pkFields {
+	// 	if pkf.TagFirst("bson") == "" {
+	// 		// if len(pkf.bsonTagParts) < 1 || pkf.bsonTagParts[0] == "" {
+	// 		return nil, fmt.Errorf("primary key field %q on type %q does not have a `bson` struct tag (or the name is empty)", pkf.name, s.name)
+	// 	}
+	// }
 
 	// execute template
 	data := struct {
-		Struct *Struct
+		Struct *model.Struct
 	}{
-		Struct: &s,
+		Struct: s,
 	}
-	tmpl, err := template.New("_main_").ParseFS(defaultTmplFS, "default.tmpl")
+	// TODO: check for and load module-specific template first
+	tmpl, err := template.New("_main_").ParseFS(defaultTmplFS, "mongocrud.tmpl")
 	if err != nil {
 		log.Fatalf("template parse error: %v", err)
 	}
@@ -248,7 +264,7 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	}
 
 	if *dryRunF != "off" {
-		diffMap, err := runDiff(inFS, outFS, ".", *dryRunF)
+		diffMap, err := diff.Run(inFS, outFS, ".", *dryRunF)
 		if err != nil {
 			log.Fatalf("error running diff: %v", err)
 		}

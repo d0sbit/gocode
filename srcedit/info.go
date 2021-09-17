@@ -5,7 +5,7 @@ import (
 	"go/token"
 )
 
-// TypeInfo describes a type found via Packge.FindType().
+// TypeInfo describes a type found via Package.FindType().
 type TypeInfo struct {
 	GenDecl   *ast.GenDecl   // GenDecl that corresponds to the type
 	FileSet   *token.FileSet // FileSet for decoding position info

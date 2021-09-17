@@ -963,6 +963,11 @@ type FileWriter interface {
 	WriteFile(name string, data []byte, perm fs.FileMode) error
 }
 
+// MkdirAller has a MkdirAll call matching the os.MkdirAll signature.
+type MkdirAller interface {
+	MkdirAll(path string, perm os.FileMode) error
+}
+
 // isStrSubset checks if s1 ⊆ s2
 // (returns true if all elements of s1 are in s2)
 func isStrSubset(s1, s2 []string) bool {

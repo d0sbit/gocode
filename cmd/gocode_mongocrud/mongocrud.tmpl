@@ -31,19 +31,19 @@ func (s *Store) db() *mongo.Database {
 // ErrNotFound provides an explicit type for the not found case,
 // intended to wrap database-specific error(s).
 type ErrNotFound struct {
-	Err error
+	err error
 }
 
 // Error implements the error interface.
 func (e *ErrNotFound) Error() string {
-	if e.Err == nil {
+	if e.err == nil {
 		return "not found"
 	}
-	return "not found: " + e.Err.Error()
+	return "not found: " + e.err.Error()
 }
 
 // Unwrap supports error wrapping.
-func (e *ErrNotFound) Unwrap() error { return e.Err }
+func (e *ErrNotFound) Unwrap() error { return e.err }
 
 // Is returns true if the specified error is also a *ErrNotFound
 func (e *ErrNotFound) Is(err error) bool {
@@ -314,8 +314,10 @@ func startMongo(t *testing.T) *tmongo {
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		if t != nil {
+			t.Logf("output: %s", b)
 			t.Fatal(err)
 		}
+		fmt.Printf("output: %s", b)
 		panic(err)
 	}
 	dockerID := strings.TrimSpace(string(b))
@@ -409,11 +411,11 @@ import "go.mongodb.org/mongo-driver/bson"
 // Delete removes a the indicated record.
 func (s *{{$.Struct.LocalName}}Store) Delete(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) error {
 	_, err := s.col().DeleteOne(ctx, bson.D{ {{range $.Struct.FieldList.PK}}
-		{"{{.BSONName}}", v{{.GoName}}},
+		{"{{.TagFirst "bson"}}", v{{.GoName}}},
 	{{end}}
     })
 	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
-		err = &ErrNotFound{Err: err}
+		err = &ErrNotFound{err: err}
 	}
 	return err
 }
@@ -429,12 +431,12 @@ func (s *{{$.Struct.LocalName}}Store) Update(ctx context.Context, o *{{$.Struct.
 	{{$idf := index $.Struct.FieldList.PK 0}}
 	_, err := s.col().UpdateOne(ctx,
 		bson.D{ {{range $.Struct.FieldList.PK}}
-			{"{{.BSONName}}", o.{{.GoName}}},
+			{"{{.TagFirst "bson"}}", o.{{.GoName}}},
 		{{end}} },
 		bson.D{ {"$set", o} },
 	)
 	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
-		err = &ErrNotFound{Err: err}
+		err = &ErrNotFound{err: err}
 	}
 	return err
 }
@@ -450,11 +452,11 @@ import "go.mongodb.org/mongo-driver/mongo"
 func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) (*{{$.Struct.QName}}, error) {
 	var ret {{$.Struct.QName}}
 	err := s.col().FindOne(ctx, bson.D{ {{range $.Struct.FieldList.PK}}
-		{"{{.BSONName}}", v{{.GoName}}},
+		{"{{.TagFirst "bson"}}", v{{.GoName}}},
 	{{end}}
     }).Decode(&ret)
 	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
-		err = &ErrNotFound{Err: err}
+		err = &ErrNotFound{err: err}
 	}
 	return &ret, err
 }
