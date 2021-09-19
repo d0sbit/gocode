@@ -190,10 +190,10 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 		trList, err := tmplToTransforms(fn, data, tmpl,
 			"TYPEStore",
 			"TYPEStoreMethods",
-			// FIJXME: filter which things go here base on flags
+			// FIXME: filter which things go here base on flags
 			"TYPEInsert",
-			// "TYPEDelete",
-			// "TYPEUpdate",
+			"TYPEDelete",
+			"TYPEUpdate",
 			"TYPESelectByID",
 			// "TYPESelect",
 			// "TYPESelectCursor",

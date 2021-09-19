@@ -49,16 +49,16 @@ TODO:
     - main_test.go needs to include writing a table migration file, just like it writes types.go DONE
     - update test to emit the correct import and call goose.Up() (after each db create) DONE
   - mysql docker test case DONE
+  - attach tx to context DONE
   - write out crud templates using sqlx
     - Insert DONE
     - SelectByID DONE
-    - DeleteByID
-    - Update
+    - Delete DONE
+    - Update DONE
     - Select
     - Count
     - SelectCursor
     - separate transaction test case
-  - attach tx to context
   - punchlist
   - implement helpers in mongocrud (maybe move to backlog)
   	- idAssign

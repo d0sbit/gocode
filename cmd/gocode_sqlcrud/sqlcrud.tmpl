@@ -50,7 +50,7 @@ func NewStore(db *sql.DB, driverName string) (*Store, error) {
 // BeginTxx starts a transaction and returns a context with an associated transaction.
 // It will error if a transaction is already in progress for the context.
 func (s *Store) BeginTxx(ctx context.Context) (context.Context, *sqlx.Tx, error) {
-	ctx, tx, txCreated, err := s.ctxTx(ctx)
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
 	if err != nil {
 		return ctx, tx, err
 	}
@@ -60,16 +60,16 @@ func (s *Store) BeginTxx(ctx context.Context) (context.Context, *sqlx.Tx, error)
 	return ctx, tx, nil
 }
 
-// RunTx will call the function f with a transaction associated with the context.
+// RunTxx will call the function f with a transaction associated with the context.
 // If f returns an error, then the transaction is rolled back, otherwise it is committed.
 // It will error if a transaction is already in progress for the context.
-func (s *Store) RunTx(ctx context.Context, f func(ctx context.Context) error) error {
-	ctx, tx, txCreated, err := s.ctxTx(ctx)
+func (s *Store) RunTxx(ctx context.Context, f func(ctx context.Context) error) error {
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
 	if err != nil {
 		return err
 	}
 	if !txCreated {
-		return errors.New("(RunTx) tx already in progress")
+		return errors.New("(RunTxx) tx already in progress")
 	}
 	defer tx.Rollback()
 	err = f(ctx)
@@ -79,9 +79,9 @@ func (s *Store) RunTx(ctx context.Context, f func(ctx context.Context) error) er
 	return tx.Commit()
 }
 
-// ctxTx will return an existing transaction associated with a context,
+// ctxTxx will return an existing transaction associated with a context,
 // or create a new one and return a context with the association.
-func (s *Store) ctxTx(ctx context.Context) (rctx context.Context, tx *sqlx.Tx, txCreated bool, rerr error) {
+func (s *Store) ctxTxx(ctx context.Context) (rctx context.Context, tx *sqlx.Tx, txCreated bool, rerr error) {
 	tx, ok := ctx.Value(ctxTxSqlxTx).(*sqlx.Tx)
 	if ok {
 		return ctx, tx, false, nil
@@ -133,6 +133,7 @@ func (e *ErrNotFound) HTTPStatusCode() int {
 import "strings"
 import "reflect"
 import "time"
+import "fmt"
 import "crypto/rand"
 import "github.com/oklog/ulid"
 
@@ -257,7 +258,7 @@ func dbFieldValue(o interface{}, k string) interface{} {
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		dbName := strings.SplitN(f.Tag.Get("bson"), ",", 2)[0]
+		dbName := strings.SplitN(f.Tag.Get("db"), ",", 2)[0]
 		if dbName == "" || dbName == "-" {
 			continue
 		}
@@ -282,6 +283,125 @@ func stringsPrefix(n []string, pfx string) []string {
 		ret = append(ret, pfx + nv)
 	}
 	return ret
+}
+
+// sqlSort returns a string appropriate for a SQL ORDER BY clause given the specified input.
+// sort indicates the sorting and o is the object to check for fields on.
+// The sort can either be a slice of strings, or a slice of map[string]interface{},
+// with the values being either 1 or -1 (float64 or int underlying type).
+// Note that each map must only contain a single entry - this is due to the fact that
+// maps in Go do not have an explicit order.
+// Any other input varation will error.
+func sqlSort(sort []interface{}, o interface{}) (ret string, err error) {
+
+	typo := derefedType(o)
+
+	var retb strings.Builder
+
+	for _, v := range sort {
+		switch vt := v.(type) {
+		case string: // string by itself means sort ascending
+			if dbFieldValue(typo, vt) == nil {
+				return "", fmt.Errorf("invalid field name %q", v)
+			}
+			retb.WriteString("`")
+			retb.WriteString(vt)
+			retb.WriteString("`,")
+		case map[string]interface{}:
+			if len(vt) != 1 {
+				return "", fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(vt))
+			}
+			for k, n := range vt { // runs exactly once
+				if dbFieldValue(typo, k) == nil {
+					return "", fmt.Errorf("invalid field name (2) %q", k)
+				}
+				ns := fmt.Sprint(n)
+				switch ns {
+				case "1":
+					retb.WriteString("`")
+					retb.WriteString(k)
+					retb.WriteString("`,")
+				case "-1":
+					retb.WriteString("`")
+					retb.WriteString(k)
+					retb.WriteString("` DESC,")
+				default:
+					return "", fmt.Errorf("invalid sort order %q for field %q", ns, k)
+				}
+			}
+		default:
+			return "", fmt.Errorf("unknown type %T found in sort order", v)
+		}
+	}
+
+	return strings.TrimSuffix(retb.String(), ","), nil
+}
+
+// sqlFilter returns a value appropriate for a mongo query given the specified input.
+// The filter must be a map with field names as keys and the values must be either appropriate
+// primitive types or another map with a supported operator.  This simplification of the mongo
+// query syntax allows us to vet the input as well as handle type conversions for field types
+// that don't have a corresponding JSONizable representation.
+// isValidMongoOp and bsonField are used to verify map keys and thus avoid allowing
+// unintended functionality.
+// o is the object to check for fields against.
+func sqlFilter(filter map[string]interface{}, o interface{}) (ret string, args []interface{}, err error) {
+
+	typo := derefedType(o)
+
+	var retb strings.Builder
+
+floop:
+	for k, v := range filter {
+		fieldVal := dbFieldValue(typo, k)
+		if fieldVal == nil {
+			return "", nil, fmt.Errorf("invalid filter key %q", k)
+		}
+		switch tv := v.(type) {
+		case float64, float32, int, int32, int64, string:
+			retb.WriteString("`")
+			retb.WriteString(k)
+			retb.WriteString("`=? AND ")
+			args = append(args, v)
+			continue floop
+		case map[string]interface{}:
+			if len(tv) != 1 {
+				return "", nil, fmt.Errorf("nested maps must only have one entry, key %q", k)
+			}
+			for subk, subv := range tv { // executes exactly once
+				var op string
+
+				switch subk {
+				case "$eq":
+					op = "="
+				case "$ne":
+					op = "<>"
+				case "$gt":
+					op = ">"
+				case "$gte":
+					op = ">="
+				case "$lt":
+					op = "<"
+				case "$lte":
+					op = "<="
+				// TODO: case "$in":
+				// TODO: case "$nin":
+				// see https://pkg.go.dev/github.com/jmoiron/sqlx#In
+				default:
+					return "", nil, fmt.Errorf("invalid key %q.%q in nesetd map", k, subk)
+				}
+				retb.WriteString("`")
+				retb.WriteString(k)
+				retb.WriteString("` ")
+				retb.WriteString(op)
+				retb.WriteString(" ? AND ")
+				args = append(args, subv)
+				continue floop
+			}
+		}
+	}
+
+	return strings.TrimSuffix(strings.TrimSpace(retb.String()), "AND"), args, nil
 }
 
 /*
@@ -358,103 +478,6 @@ func mongoFixInputValue(v interface{}, t reflect.Type, k string) (interface{}, e
 		return id, err
 	}
 	return v, nil
-}
-
-// mongoSort returns a bson.D appropriate for a mongo query given the specified input.
-// sort indicates the sorting and o is the object to check for fields on.
-// The sort can either be a slice of strings, or a slice of map[string]interface{},
-// with the values being either 1 or -1 (float64 or int underlying type).
-// Note that each map must only contain a single entry - this is due to the fact that
-// maps in Go do not have an explicit order.
-// Any other input varation will error.
-func mongoSort(sort []interface{}, o interface{}) (ret bson.D, err error) {
-
-	typo := derefedType(o)
-
-	ret = make(bson.D, 0, len(sort))
-
-	for _, v := range sort {
-		switch vt := v.(type) {
-		case string: // string by itself means sort ascending
-			if bsonField(typo, vt) == nil {
-				return nil, fmt.Errorf("invalid field name %q", v)
-			}
-			ret = append(ret, primitive.E{Key:vt, Value:1})
-		case map[string]interface{}:
-			if len(vt) != 1 {
-				return nil, fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(vt))
-			}
-			for k, n := range vt {
-				if bsonField(typo, k) == nil {
-					return nil, fmt.Errorf("invalid field name (2) %q", k)
-				}
-				ns := fmt.Sprint(n)
-				switch ns {
-				case "1":
-					ret = append(ret, primitive.E{Key:k, Value:1})
-				case "-1":
-					ret = append(ret, primitive.E{Key:k, Value:-1})
-				default:
-					return nil, fmt.Errorf("invalid sort order %q for field %q", ns, k)
-				}
-			}
-		default:
-			return nil, fmt.Errorf("unknown type %T found in sort order", v)
-		}
-	}
-
-	return ret, nil
-}
-
-// mongoFilter returns a value appropriate for a mongo query given the specified input.
-// The filter must be a map with field names as keys and the values must be either appropriate
-// primitive types or another map with a supported operator.  This simplification of the mongo
-// query syntax allows us to vet the input as well as handle type conversions for field types
-// that don't have a corresponding JSONizable representation.
-// isValidMongoOp and bsonField are used to verify map keys and thus avoid allowing
-// unintended functionality.
-// o is the object to check for fields against.
-func mongoFilter(filter map[string]interface{}, o interface{}) (ret bson.D, err error) {
-
-	typo := derefedType(o)
-
-	ret = make(bson.D, 0, len(filter)) // mongo driver barfs with nil bson.D
-
-floop:
-	for k, v := range filter {
-		if bsonField(typo, k) == nil {
-			return nil, fmt.Errorf("invalid filter key %q", k)
-		}
-		switch tv := v.(type) {
-		case float64, float32, int, int32, int64, string:
-			v2, err := mongoFixInputValue(v, typo, k)
-			if err != nil {
-				return nil, err
-			}
-			ret = append(ret, bson.E{Key:k, Value:v2})
-			continue floop
-		case map[string]interface{}:
-			if len(tv) != 1 {
-				return nil, fmt.Errorf("nested maps must only have one entry, key %q", k)
-			}
-			for subk, subv := range tv { // executes exactly once
-				if !isValidMongoOp(subk) {
-					return nil, fmt.Errorf("invalid key %q.%q in nesetd map", k, subk)
-				}
-				switch subvv := subv.(type) {
-				case float64, float32, int, int32, int64, string:
-					v2, err := mongoFixInputValue(subvv, typo, k)
-					if err != nil {
-						return nil, err
-					}
-					ret = append(ret, bson.E{Key:k, Value:bson.D{bson.E{Key:subk, Value:v2}}})
-					continue floop
-				}
-			}
-		}
-	}
-
-	return ret, nil
 }
 */
 {{end}}
@@ -696,7 +719,7 @@ func (s *{{$.Struct.LocalName}}Store) Insert(ctx context.Context, o *{{$.Struct.
 	if err := storeValidate(o); err != nil {
 		return err
 	}
-	ctx, tx, txCreated, err := s.ctxTx(ctx)
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
 	if err != nil {
 		return err
 	}
@@ -727,39 +750,67 @@ func (s *{{$.Struct.LocalName}}Store) Insert(ctx context.Context, o *{{$.Struct.
 
 {{define "TYPEDelete"}}
 import "context"
-import "go.mongodb.org/mongo-driver/bson"
+import "database/sql"
 
 // Delete removes a the indicated record.
 func (s *{{$.Struct.LocalName}}Store) Delete(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) error {
-	_, err := s.col().DeleteOne(ctx, bson.D{ {{range $.Struct.FieldList.PK}}
-		{"{{.TagFirst "db"}}", v{{.GoName}}},
-	{{end}}
-    })
-	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
+	{{$idf := index $.Struct.FieldList.PK 0}}
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
+	if err != nil {
+		return err
+	}
+	if txCreated {
+		defer tx.Rollback()
+	}
+	sqlText := "DELETE FROM `" + s.tableName() + "` "+
+		"WHERE `{{$idf.TagFirst "db"}}` = ?"
+	_, err = tx.Exec(sqlText, v{{$idf.GoName}})
+	if err != nil && errors.Is(err, sql.ErrNoRows) {
 		err = &ErrNotFound{err: err}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if txCreated {
+		return tx.Commit()
+	}
+	return nil
 }
 {{end}}
 
 {{define "TYPEUpdate"}}
 import "context"
-import "go.mongodb.org/mongo-driver/bson"
-import "go.mongodb.org/mongo-driver/bson/primitive"
 
 // Update overwrites an existing record.
 func (s *{{$.Struct.LocalName}}Store) Update(ctx context.Context, o *{{$.Struct.QName}}) error {
 	{{$idf := index $.Struct.FieldList.PK 0}}
-	_, err := s.col().UpdateOne(ctx,
-		bson.D{ {{range $.Struct.FieldList.PK}}
-			{"{{.TagFirst "db"}}", o.{{.GoName}}},
-		{{end}} },
-		bson.D{ {"$set", o} },
-	)
-	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
+	if err != nil {
+		return err
+	}
+	if txCreated {
+		defer tx.Rollback()
+	}
+	fns := dbFieldNames(o, "{{$idf.TagFirst "db"}}")
+	args := make([]interface{}, 0, len(fns) + {{len $.Struct.FieldList.PK}})
+	for _, fn := range fns {
+		args = append(args, dbFieldValue(o, fn))
+	}
+	sqlText := "UPDATE `" + s.tableName() + "` SET " +
+		strings.Join(dbFieldQuote(fns), " = ?, ") + " = ? " +
+		" WHERE `{{$idf.TagFirst "db"}}` = ? "
+	args = append(args, o.{{$idf.GoName}})
+	_, err = tx.Exec(sqlText, args...)
+	if err != nil && errors.Is(err, sql.ErrNoRows) {
 		err = &ErrNotFound{err: err}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if txCreated {
+		return tx.Commit()
+	}
+	return nil
 }
 {{end}}
 
@@ -772,7 +823,7 @@ import "database/sql"
 // SelectByID returns the matching record by primary key.
 func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.Struct.FieldList.PK}}v{{.GoName}} {{.GoTypeExpr}},{{end}}) (*{{$.Struct.QName}}, error) {
 	var ret {{$.Struct.QName}}
-	ctx, tx, txCreated, err := s.ctxTx(ctx)
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -799,6 +850,7 @@ func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.
 
 {{define "TYPESelect"}}
 import "errors"
+import "strings"
 
 //import "log"
 //var _ log.Logger  // tmp
@@ -813,26 +865,58 @@ func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit 
 		return errors.New("result must not be nil")
 	}
 
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if txCreated {
+		defer tx.Rollback()
+	}
+
 	var v {{$.Struct.LocalName}}
 
-	filter, err := mongoFilter(critiera, &v)
+	whereSQL, whereArgs, err := sqlFilter(critiera, &v)
 	if err != nil {
 		return err
 	}
-	sort, err := mongoSort(orderBy, &v)
+	orderSQL, err := sqlSort(orderBy, &v)
 	if err != nil {
 		return err
 	}
 
-	cursor, err := s.col().Find(ctx, filter, &options.FindOptions{ Limit: &limit, Skip: &offset, Sort: sort })
+	var sqlb strings.Builder
+	sqlb.WriteString("SELECT ")
+	sqlb.WriteString(strings.Join(dbFieldQuote(dbFieldNames(&ret)), ","))
+	sqlb.WriteString(" FROM ")
+	sqlb.WriteString("`")
+	sqlb.WriteString(s.tableName())
+	sqlb.WriteString("` ")
+	if whereSQL != "" {
+		sqlb.WriteString(" WHERE ")
+		sqlb.WriteString(whereSQL)
+	}
+	if orderSQL != "" {
+		sqlb.WriteString(" ORDER BY ")
+		sqlb.WriteString(orderSQL)
+	}
+	if limit > 0 {
+		sqlb.WriteString(" LIMIT ")
+		fmt.Fprint(&sqlb, limit)
+		if offset > 0 {
+			sqlb.WriteString(" OFFSET ")
+			fmt.Fprint(&sqlb, offset)
+		}
+	}
+
+	rows, err := tx.Queryx(sqlb.String(), whereArgs...)
 	if err != nil {
 		return err
 	}
-	defer cursor.Close(ctx)
+	defer rows.Close()
 
-	for cursor.Next(ctx) {
+	for rows.Next() {
 		v = {{$.Struct.LocalName}} {}
-		err := cursor.Decode(&v)
+		err := rows.StructScan(&v)
 		if err != nil {
 			return err
 		}
@@ -841,8 +925,10 @@ func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit 
 			return err
 		}
 	}
-
-	return cursor.err()
+	if txCreated {
+		return tx.Commit()
+	}
+	return nil
 }
 {{end}}
 
@@ -933,7 +1019,7 @@ func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit in
 // Count returns the count of the result of the indicated query.
 func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[string]interface{}) (int64, error) {
 	var v {{$.Struct.LocalName}}
-	filter, err := mongoFilter(critiera, &v)
+	filter, err := sqlFilter(critiera, &v)
 	if err != nil {
 		return 0, err
 	}
@@ -944,49 +1030,60 @@ func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[st
 {{define "TestTYPE"}}
 import "testing"
 import "context"
-//import "errors"
+import "errors"
 
 func Test{{$.Struct.LocalName}}CRUD(t *testing.T) {
 	
 	{{$idf := index $.Struct.FieldList.PK 0}}
 
-	store := newTestStore(t)
-	ctx := context.Background()
+	f := func(t *testing.T, ctx context.Context, store *Store) {
+		o := {{$.Struct.LocalName}}{}
+		err := store.{{$.Struct.LocalName}}().Insert(ctx, &o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := o.{{$idf.GoName}}
 
-	o := {{$.Struct.LocalName}}{}
-	err := store.{{$.Struct.LocalName}}().Insert(ctx, &o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := o.{{$idf.GoName}}
+		t.Logf("ID: %v", id)
 
-	t.Logf("ID: %v", id)
+		o2, err := store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o.{{$idf.GoName}} != o2.{{$idf.GoName}} {
+			t.Errorf("mismatched IDs, expected: %v, actual: %v", o.{{$idf.GoName}}, o2.{{$idf.GoName}})
+		}
 
-	o2, err := store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if o.{{$idf.GoName}} != o2.{{$idf.GoName}} {
-		t.Errorf("mismatched IDs, expected: %v, actual: %v", o.{{$idf.GoName}}, o2.{{$idf.GoName}})
+		err = store.{{$.Struct.LocalName}}().Update(ctx, o2)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = store.{{$.Struct.LocalName}}().Delete(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
+		var errNotFound *ErrNotFound
+		if !(err != nil && errors.As(err, &errNotFound)) {
+			t.Errorf("unexpected select result after delete: %v", err)
+		}
 	}
 
-	/*
-	err = store.{{$.Struct.LocalName}}().Update(ctx, o2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Run("notx", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+		f(t, ctx, store)
+	})
 
-	err = store.{{$.Struct.LocalName}}().Delete(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = store.{{$.Struct.LocalName}}().SelectByID(ctx, id)
-	var errNotFound *ErrNotFound
-	if !(err != nil && errors.As(err, &errNotFound)) {
-		t.Errorf("unexpected select result after delete: %v", err)
-	}
-	*/
+	t.Run("tx", func(t *testing.T) {
+		store := newTestStore(t)
+		store.RunTxx(context.Background(), func(ctx context.Context) error {
+			f(t, ctx, store)
+			return nil
+		})
+	})
 
 }
 
