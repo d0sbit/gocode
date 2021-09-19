@@ -195,9 +195,9 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 			"TYPEDelete",
 			"TYPEUpdate",
 			"TYPESelectByID",
-			// "TYPESelect",
-			// "TYPESelectCursor",
-			// "TYPECount",
+			"TYPESelect",
+			"TYPESelectCursor",
+			"TYPECount",
 		)
 		if err != nil {
 			log.Fatal(err)

@@ -136,6 +136,7 @@ import "time"
 import "fmt"
 import "crypto/rand"
 import "github.com/oklog/ulid"
+import "github.com/jmoiron/sqlx"
 
 func IDString() string {
 	return ulid.MustNew(uint64(time.Now().UnixNano() / int64(time.Millisecond)), rand.Reader).String()
@@ -294,15 +295,15 @@ func stringsPrefix(n []string, pfx string) []string {
 // Any other input varation will error.
 func sqlSort(sort []interface{}, o interface{}) (ret string, err error) {
 
-	typo := derefedType(o)
+	{{/* typo := derefedType(o) */}}
 
 	var retb strings.Builder
 
 	for _, v := range sort {
 		switch vt := v.(type) {
 		case string: // string by itself means sort ascending
-			if dbFieldValue(typo, vt) == nil {
-				return "", fmt.Errorf("invalid field name %q", v)
+			if dbFieldValue(o, vt) == nil {
+				return "", fmt.Errorf("invalid field name (1) %q", vt)
 			}
 			retb.WriteString("`")
 			retb.WriteString(vt)
@@ -312,7 +313,7 @@ func sqlSort(sort []interface{}, o interface{}) (ret string, err error) {
 				return "", fmt.Errorf("entries for sort order must have exactly one key, found %d instead", len(vt))
 			}
 			for k, n := range vt { // runs exactly once
-				if dbFieldValue(typo, k) == nil {
+				if dbFieldValue(o, k) == nil {
 					return "", fmt.Errorf("invalid field name (2) %q", k)
 				}
 				ns := fmt.Sprint(n)
@@ -347,13 +348,14 @@ func sqlSort(sort []interface{}, o interface{}) (ret string, err error) {
 // o is the object to check for fields against.
 func sqlFilter(filter map[string]interface{}, o interface{}) (ret string, args []interface{}, err error) {
 
-	typo := derefedType(o)
+	{{/* typo := derefedType(o) */}}
 
+	inExpand := false
 	var retb strings.Builder
 
 floop:
 	for k, v := range filter {
-		fieldVal := dbFieldValue(typo, k)
+		fieldVal := dbFieldValue(o, k)
 		if fieldVal == nil {
 			return "", nil, fmt.Errorf("invalid filter key %q", k)
 		}
@@ -370,23 +372,28 @@ floop:
 			}
 			for subk, subv := range tv { // executes exactly once
 				var op string
-
+				var postOp string
 				switch subk {
-				case "$eq":
+				case "$eq", "=":
 					op = "="
-				case "$ne":
+				case "$ne", "<>", "!=":
 					op = "<>"
-				case "$gt":
+				case "$gt", ">":
 					op = ">"
-				case "$gte":
+				case "$gte", ">=":
 					op = ">="
-				case "$lt":
+				case "$lt", "<":
 					op = "<"
-				case "$lte":
+				case "$lte", "<=":
 					op = "<="
-				// TODO: case "$in":
-				// TODO: case "$nin":
-				// see https://pkg.go.dev/github.com/jmoiron/sqlx#In
+				case "$in", "in":
+					inExpand = true
+					op = "IN ("
+					postOp = ")"
+				case "$nin", "not in":
+					inExpand = true
+					op = "NOT IN ("
+					postOp = ")"
 				default:
 					return "", nil, fmt.Errorf("invalid key %q.%q in nesetd map", k, subk)
 				}
@@ -394,14 +401,24 @@ floop:
 				retb.WriteString(k)
 				retb.WriteString("` ")
 				retb.WriteString(op)
-				retb.WriteString(" ? AND ")
+				retb.WriteString(" ? ")
+				retb.WriteString(postOp)
+				retb.WriteString(" AND ")
 				args = append(args, subv)
 				continue floop
 			}
 		}
 	}
 
-	return strings.TrimSuffix(strings.TrimSpace(retb.String()), "AND"), args, nil
+	ret = strings.TrimSuffix(strings.TrimSpace(retb.String()), "AND")
+	if inExpand {
+		ret, args, err = sqlx.In(ret, args)
+		if err != nil {
+			return ret, args, err
+		}
+	}
+
+	return ret, args, nil
 }
 
 /*
@@ -729,7 +746,7 @@ func (s *{{$.Struct.LocalName}}Store) Insert(ctx context.Context, o *{{$.Struct.
 	sqlText := "INSERT INTO `" + s.tableName() + "` "+
 		"(" + strings.Join(dbFieldQuote(dbFieldNames(o)), ",") + ") VALUES "+
 		"(" + strings.Join(stringsPrefix(dbFieldNames(o), ":"), ",") + ")"
-	res, err := tx.NamedExec(sqlText, o)
+	res, err := tx.NamedExecContext(ctx, sqlText, o)
 	if err != nil {
 		return err
 	}
@@ -764,7 +781,7 @@ func (s *{{$.Struct.LocalName}}Store) Delete(ctx context.Context, {{range $.Stru
 	}
 	sqlText := "DELETE FROM `" + s.tableName() + "` "+
 		"WHERE `{{$idf.TagFirst "db"}}` = ?"
-	_, err = tx.Exec(sqlText, v{{$idf.GoName}})
+	_, err = tx.ExecContext(ctx, sqlText, v{{$idf.GoName}})
 	if err != nil && errors.Is(err, sql.ErrNoRows) {
 		err = &ErrNotFound{err: err}
 	}
@@ -800,7 +817,7 @@ func (s *{{$.Struct.LocalName}}Store) Update(ctx context.Context, o *{{$.Struct.
 		strings.Join(dbFieldQuote(fns), " = ?, ") + " = ? " +
 		" WHERE `{{$idf.TagFirst "db"}}` = ? "
 	args = append(args, o.{{$idf.GoName}})
-	_, err = tx.Exec(sqlText, args...)
+	_, err = tx.ExecContext(ctx, sqlText, args...)
 	if err != nil && errors.Is(err, sql.ErrNoRows) {
 		err = &ErrNotFound{err: err}
 	}
@@ -834,7 +851,7 @@ func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.
 		" FROM `" + s.tableName() + "` WHERE " + strings.Join([]string { {{range $.Struct.FieldList.PK}}
 		" `{{.TagFirst "db"}}` = ?",{{end}}
 	}, ",")
-	err = tx.Get(&ret, sqlText, {{range $.Struct.FieldList.PK}}v{{.GoName}},{{end}})
+	err = tx.GetContext(ctx, &ret, sqlText, {{range $.Struct.FieldList.PK}}v{{.GoName}},{{end}})
 	if err != nil && errors.Is(err, sql.ErrNoRows) {
 		err = &ErrNotFound{err: err}
 	}
@@ -851,12 +868,16 @@ func (s *{{$.Struct.LocalName}}Store) SelectByID(ctx context.Context, {{range $.
 {{define "TYPESelect"}}
 import "errors"
 import "strings"
+import "fmt"
 
 //import "log"
 //var _ log.Logger  // tmp
 
 // Select runs the indicated query and loads it's return into result.
-// TODO: explain args
+// Offset is the number of rows to skip, limit is the maximum to return (after any skip/offset).
+// The criteria map is converted into a SQL WHERE clause (see sqlFilter in this package).
+// The orderBy slice is converted into a SQL ORDER BY clause (see sqlSort in this package).
+// Records are struct scanned and then passed into the appropriate method on result.
 // Note that for more complex query needs it is recommended you add a custom select function
 // instead of trying to adapt this one to every use case.
 func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit int64, critiera map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) error {
@@ -867,7 +888,7 @@ func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit 
 
 	ctx, tx, txCreated, err := s.ctxTxx(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if txCreated {
 		defer tx.Rollback()
@@ -885,30 +906,38 @@ func (s *{{$.Struct.LocalName}}Store) Select(ctx context.Context, offset, limit 
 	}
 
 	var sqlb strings.Builder
-	sqlb.WriteString("SELECT ")
-	sqlb.WriteString(strings.Join(dbFieldQuote(dbFieldNames(&ret)), ","))
+	fmt.Fprintf(&sqlb, "SELECT %s FROM `%s` ",
+		strings.Join(dbFieldQuote(dbFieldNames(&v)), ","),
+		s.tableName(),
+	)
+	{{/* sqlb.WriteString("SELECT ")
+	sqlb.WriteString()
 	sqlb.WriteString(" FROM ")
 	sqlb.WriteString("`")
 	sqlb.WriteString(s.tableName())
-	sqlb.WriteString("` ")
+	sqlb.WriteString("` ") */}}
 	if whereSQL != "" {
-		sqlb.WriteString(" WHERE ")
-		sqlb.WriteString(whereSQL)
+		fmt.Fprintf(&sqlb, " WHERE %s", whereSQL)
+		{{/* sqlb.WriteString(" WHERE ")
+		sqlb.WriteString(whereSQL) */}}
 	}
 	if orderSQL != "" {
-		sqlb.WriteString(" ORDER BY ")
-		sqlb.WriteString(orderSQL)
+		fmt.Fprintf(&sqlb, " ORDER BY %s", orderSQL)
+		{{/* sqlb.WriteString(" ORDER BY ")
+		sqlb.WriteString(orderSQL) */}}
 	}
 	if limit > 0 {
-		sqlb.WriteString(" LIMIT ")
-		fmt.Fprint(&sqlb, limit)
+		fmt.Fprintf(&sqlb, " LIMIT %d", limit)
+		{{/* sqlb.WriteString(" LIMIT ")
+		fmt.Fprint(&sqlb, limit) */}}
 		if offset > 0 {
-			sqlb.WriteString(" OFFSET ")
-			fmt.Fprint(&sqlb, offset)
+			fmt.Fprintf(&sqlb, " OFFSET %d", offset)
+			{{/* sqlb.WriteString(" OFFSET ")
+			fmt.Fprint(&sqlb, offset) */}}
 		}
 	}
 
-	rows, err := tx.Queryx(sqlb.String(), whereArgs...)
+	rows, err := tx.QueryxContext(ctx, sqlb.String(), whereArgs...)
 	if err != nil {
 		return err
 	}
@@ -941,8 +970,12 @@ import "fmt"
 //var _ log.Logger
 
 // SelectCursor is similar to Select but instead of specifying an offset and limit it uses a cursor.
-// Useful for iterating over large datasets where computing the total size or ...
-// TODO: explain args
+// Useful for efficiently iterating over large datasets.
+// The limit is the maximum to return (after any skip/offset).  Cursor is the prior cursor value
+// to continue receiving results from, or an empty string to start at the beginning.
+// The criteria map is converted into a SQL WHERE clause (see sqlFilter in this package).
+// The orderBy slice is converted into a SQL ORDER BY clause (see sqlSort in this package).
+// Records are struct scanned and then passed into the appropriate method on result.
 // Note that for more complex query needs it is recommended you add a custom select function
 // instead of trying to adapt this one to every use case.
 func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit int64, cursor string, criteria map[string]interface{}, orderBy []interface{}, result {{$.Struct.QName}}Resulter) (nextCursor string, err error) {
@@ -983,11 +1016,10 @@ func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit in
 		for _, ov := range orderBy {
 			switch ov2 := ov.(type) {
 			case string:
-				cout[ov2] = bsonFieldValue(o, ov2)
+				cout[ov2] = dbFieldValue(o, ov2)
 			case map[string]interface{}:
 				for k := range ov2 {
-					//cout[k] = map[string]interface{}{
-					cout[k] = bsonFieldValue(o, k)
+					cout[k] = dbFieldValue(o, k)
 				}
 			default:
 				return fmt.Errorf("unknown type in orderBy entry %T", ov)
@@ -1017,13 +1049,46 @@ func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit in
 
 {{define "TYPECount"}}
 // Count returns the count of the result of the indicated query.
-func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[string]interface{}) (int64, error) {
-	var v {{$.Struct.LocalName}}
-	filter, err := sqlFilter(critiera, &v)
+func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[string]interface{}, orderBy []interface{}) (int64, error) {
+
+	ctx, tx, txCreated, err := s.ctxTxx(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return s.col().CountDocuments(ctx, filter)
+	if txCreated {
+		defer tx.Rollback()
+	}
+
+	var v {{$.Struct.LocalName}}
+
+	whereSQL, whereArgs, err := sqlFilter(critiera, &v)
+	if err != nil {
+		return 0, err
+	}
+	orderSQL, err := sqlSort(orderBy, &v)
+	if err != nil {
+		return 0, err
+	}
+
+	var sqlb strings.Builder
+	fmt.Fprintf(&sqlb, "SELECT COUNT(1) c FROM `%s` ", s.tableName())
+	if whereSQL != "" {
+		fmt.Fprintf(&sqlb, " WHERE %s", whereSQL)
+	}
+	if orderSQL != "" {
+		fmt.Fprintf(&sqlb, " ORDER BY %s", orderSQL)
+	}
+
+	var ret int64
+	err = tx.QueryRowxContext(ctx, sqlb.String(), whereArgs...).Scan(&ret)
+	if err != nil {
+		return 0, err
+	}
+
+	if txCreated {
+		return ret, tx.Commit()
+	}
+	return ret, nil
 }
 {{end}}
 
@@ -1087,7 +1152,6 @@ func Test{{$.Struct.LocalName}}CRUD(t *testing.T) {
 
 }
 
-/*
 func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 	
 	{{$idf := index $.Struct.FieldList.PK 0}}
@@ -1106,7 +1170,7 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 		}
 	}
 
-	count, err := store.{{$.Struct.LocalName}}().Count(ctx, nil)
+	count, err := store.{{$.Struct.LocalName}}().Count(ctx, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1115,7 +1179,7 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 	}
 
 	result = nil
-	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, nil, []interface{}{"_id"}, &result)
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, nil, []interface{}{"{{$idf.TagFirst "db"}}"}, &result)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1124,7 +1188,7 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 	}
 
 	result = nil
-	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 0, nil, []interface{}{"_id"}, &result)
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 0, nil, []interface{}{"{{$idf.TagFirst "db"}}"}, &result)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1156,7 +1220,7 @@ func Test{{$.Struct.LocalName}}SelectCursor(t *testing.T) {
 	loopCount := 0
 	for i := 0; i < 10; i++{
 		var nextRes {{$.Struct.LocalName}}List
-		cursor, err = store.{{$.Struct.LocalName}}().SelectCursor(ctx, 2, cursor, nil, []interface{}{"_id"}, &nextRes)
+		cursor, err = store.{{$.Struct.LocalName}}().SelectCursor(ctx, 2, cursor, nil, []interface{}{"{{$idf.TagFirst "db"}}"}, &nextRes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1175,5 +1239,4 @@ func Test{{$.Struct.LocalName}}SelectCursor(t *testing.T) {
 		t.Errorf("unexpected loopCount %d", loopCount)
 	}
 }
-*/
 {{end}}

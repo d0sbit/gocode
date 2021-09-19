@@ -596,12 +596,13 @@ func (s *{{$.Struct.LocalName}}Store) SelectCursor(ctx context.Context, limit in
 
 {{define "TYPECount"}}
 // Count returns the count of the result of the indicated query.
-func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[string]interface{}) (int64, error) {
+func (s *{{$.Struct.LocalName}}Store) Count(ctx context.Context, critiera map[string]interface{}, orderBy []interface{}) (int64, error) {
 	var v {{$.Struct.LocalName}}
 	filter, err := mongoFilter(critiera, &v)
 	if err != nil {
 		return 0, err
 	}
+	// FIXME: add orderBy/sort to filter options
 	return s.col().CountDocuments(ctx, filter)
 }
 {{end}}
@@ -671,7 +672,7 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 		}
 	}
 
-	count, err := store.{{$.Struct.LocalName}}().Count(ctx, nil)
+	count, err := store.{{$.Struct.LocalName}}().Count(ctx, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +681,7 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 	}
 
 	result = nil
-	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, nil, []interface{}{"_id"}, &result)
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 2, nil, []interface{}{"{{$idf.TagFirst "bson"}}"}, &result)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +690,7 @@ func Test{{$.Struct.LocalName}}Select(t *testing.T) {
 	}
 
 	result = nil
-	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 0, nil, []interface{}{"_id"}, &result)
+	err = store.{{$.Struct.LocalName}}().Select(ctx, 0, 0, nil, []interface{}{"{{$idf.TagFirst "bson"}}"}, &result)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +722,7 @@ func Test{{$.Struct.LocalName}}SelectCursor(t *testing.T) {
 	loopCount := 0
 	for i := 0; i < 10; i++{
 		var nextRes {{$.Struct.LocalName}}List
-		cursor, err = store.{{$.Struct.LocalName}}().SelectCursor(ctx, 2, cursor, nil, []interface{}{"_id"}, &nextRes)
+		cursor, err = store.{{$.Struct.LocalName}}().SelectCursor(ctx, 2, cursor, nil, []interface{}{"{{$idf.TagFirst "bson"}}"}, &nextRes)
 		if err != nil {
 			t.Fatal(err)
 		}

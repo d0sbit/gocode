@@ -51,20 +51,23 @@ TODO:
   - mysql docker test case DONE
   - attach tx to context DONE
   - write out crud templates using sqlx
+    - separate transaction test case DONE
     - Insert DONE
     - SelectByID DONE
     - Delete DONE
     - Update DONE
-    - Select
-    - Count
+    - Select DONE
+    - Count DONE
     - SelectCursor
-    - separate transaction test case
   - punchlist
+    - try a few command line commands and make sure the basic stuff works
   - implement helpers in mongocrud (maybe move to backlog)
   	- idAssign
 	  - createTimeTouch
 	  - updateTimeTouch
 	  - storeValidate
+  - mongo Count() needs sort also just like SQL so it can determine the index (move to backlog)
+  - backlog: break up the tests so they track with which methods are included, and add the options too (-create, -read, etc.)
 * Handlers
   - see if we can express permissions with a super simple interface abstraction, e.g. CanRead(interface{}) bool, etc.
     it should be optional, but could let us have perms from the get-go without
