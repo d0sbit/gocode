@@ -58,7 +58,7 @@ TODO:
     - Update DONE
     - Select DONE
     - Count DONE
-    - SelectCursor
+    - SelectCursor DONE
   - punchlist
     - try a few command line commands and make sure the basic stuff works
   - implement helpers in mongocrud (maybe move to backlog)

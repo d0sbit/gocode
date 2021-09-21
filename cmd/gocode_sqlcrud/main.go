@@ -105,7 +105,10 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 			dryRunFS.MkdirAll(packagePath, 0755)
 		}
 		if migrationsPackagePath != "" {
-			dryRunFS.MkdirAll(migrationsPackagePath, 0755)
+			// log.Printf("creating migrationsPackagePath %q", migrationsPackagePath)
+			err := dryRunFS.MkdirAll(migrationsPackagePath, 0755)
+			// log.Printf("migrations MkdirAll returned: %v", err)
+			_ = err
 		}
 		outFS = dryRunFS
 	}
@@ -114,6 +117,8 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	pkg := srcedit.NewPackage(inFS, outFS, modPath, packagePath)
 
 	// load the migrations package
+	log.Printf("NewPackage for migrations: inFS=%#v, outFS=%#v, modPath=%#v, migrationsPackagePath=%#v",
+		inFS, outFS, modPath, migrationsPackagePath)
 	migrationsPkg := srcedit.NewPackage(inFS, outFS, modPath, migrationsPackagePath)
 
 	// get the definition for the specified type
@@ -278,7 +283,7 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 			}
 			return nil
 		}))
-		if err != nil {
+		if err != nil && !os.IsNotExist(err) {
 			log.Fatalf("error walking migrations dir %q: %v", migrationsPackagePath, err)
 		}
 

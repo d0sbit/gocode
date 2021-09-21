@@ -215,6 +215,7 @@ func (p *Package) fileNames() ([]string, error) {
 		subDir = p.subDir
 	}
 	dirEntryList, err := fs.ReadDir(p.outfs, subDir)
+	// log.Printf("fs.ReadDir(outfs=%#v, %q) err: %v", p.outfs, subDir, err)
 	if err != nil {
 		return nil, fmt.Errorf("cannot load from output dir %q (did you forget to create it?): %w", subDir, err)
 	}
@@ -229,17 +230,21 @@ func (p *Package) fileNames() ([]string, error) {
 	}
 
 	dirEntryList, err = fs.ReadDir(p.infs, subDir)
+	// log.Printf("fs.ReadDir(infs=%#v, %q) err: %v", p.infs, subDir, err)
 	if err != nil {
-		return nil, err
-	}
-	for _, de := range dirEntryList {
-		if de.IsDir() {
-			continue
+		if !os.IsNotExist(err) { // package dir doesn't need to exist in input
+			return nil, err
 		}
-		if path.Ext(de.Name()) != ".go" {
-			continue
+	} else {
+		for _, de := range dirEntryList {
+			if de.IsDir() {
+				continue
+			}
+			if path.Ext(de.Name()) != ".go" {
+				continue
+			}
+			retMap[de.Name()] = struct{}{}
 		}
-		retMap[de.Name()] = struct{}{}
 	}
 
 	var ret []string
@@ -293,31 +298,59 @@ func (p *Package) ApplyTransform(tr Transform) error {
 
 	err := p.load()
 	if err != nil {
-		return err
+		return fmt.Errorf("package load in ApplyTransform error: %w", err)
 	}
 
 	switch t := tr.(type) {
 
 	case *AddFuncDeclTransform:
-		return p.applyAddFuncDecl(t)
+		err := p.applyAddFuncDecl(t)
+		if err != nil {
+			return fmt.Errorf("applyAddFuncDecl: %w", err)
+		}
+		return nil
 
 	case *DedupImportsTransform:
-		return p.applyDedupImports(t)
+		err := p.applyDedupImports(t)
+		if err != nil {
+			return fmt.Errorf("applyDedupImports: %w", err)
+		}
+		return nil
 
 	case *ImportTransform:
-		return p.applyImport(t)
+		err := p.applyImport(t)
+		if err != nil {
+			return fmt.Errorf("applyImport: %w", err)
+		}
+		return nil
 
 	case *AddConstDeclTransform:
-		return p.applyAddConstDecl(t)
+		err := p.applyAddConstDecl(t)
+		if err != nil {
+			return fmt.Errorf("applyAddConstDecl: %w", err)
+		}
+		return nil
 
 	case *AddVarDeclTransform:
-		return p.applyAddVarDecl(t)
+		err := p.applyAddVarDecl(t)
+		if err != nil {
+			return fmt.Errorf("applyAddVarDecl: %w", err)
+		}
+		return nil
 
 	case *AddTypeDeclTransform:
-		return p.applyAddTypeDecl(t)
+		err := p.applyAddTypeDecl(t)
+		if err != nil {
+			return fmt.Errorf("applyAddTypeDecl: %w", err)
+		}
+		return nil
 
 	case *GofmtTransform:
-		return p.applyGoFmt(t)
+		err := p.applyGoFmt(t)
+		if err != nil {
+			return fmt.Errorf("applyAddFuncDecl: %w", err)
+		}
+		return nil
 
 	}
 
@@ -839,7 +872,7 @@ func (p *Package) load() error {
 
 	fnl, err := p.fileNames()
 	if err != nil {
-		return err
+		return fmt.Errorf("fileNames error: %w", err)
 	}
 
 	p.fset = &token.FileSet{}
