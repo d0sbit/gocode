@@ -89,9 +89,15 @@ TODO:
       - if status is 0 detect from err or 500
       - if err is nil then don't log
       - if responseFormat is "" then don't write to output
+* Implement "gocode"
+  - See if we can obviate the need for the UI entirely by making the commands just target the file name, and use the folders (as well as settings) to infer which tools and the various settings.
+  - If we need to have some interactive stuff in there too that could be okay also (Did you mean X as the folder for ABC? [Y/n])
 * Decide what we want to do about main program, need at least something for that
 * Implement custom template support - ideally an option would write the default template (files) to a well-known location and it could be edited frmo there.
-* UI
+* Add to backlog:
+  - HTTPStatusCode should probably go away and instead just check for things like sql.ErrNoRows, etc. in writeErr
+  - fix -dry-run on all programs so -dry-run doesn't accept args, use -dry-run-html if neeeded
+* UI (if still needed)
   - common flags approach so we can communicate to the UI what each program needs
   - diff'ed (dry-run) output
 * Clean up main README and make some decent exampels of how to use

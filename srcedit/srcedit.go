@@ -121,7 +121,7 @@ func FindModuleDir(fsys fs.FS, startDir string) (string, error) {
 		newdir := path.Clean(path.Join(dir, ".."))
 
 		// check to see if we're at the top
-		if newdir == dir {
+		if newdir == dir || newdir == ".." {
 			return "", errors.New("unable to file go.mod")
 		}
 
@@ -806,6 +806,34 @@ func (p *Package) findVarOrConstDecl(tok token.Token, withAnyNames []string) (fi
 	return "", nil, nil
 }
 
+// FindTypeLoose is like FindType but instead of looking for an exact match it looks for a type
+// that would correspond to the given file name.  Specifically it checks if a type name matches
+// when compared as all lower case with punctuation removed.
+func (p *Package) FindTypeLoose(withName string) (ret *TypeInfo, err error) {
+	err = p.load()
+	if err != nil {
+		return nil, fmt.Errorf("load failed: %w", err)
+	}
+	withNameCleaned := strings.NewReplacer(
+		"-", "",
+		"_", "",
+		".", "",
+	).Replace(withName)
+	filename, typeDecl := p.findTypeDeclMatch(func(typeName string) bool {
+		return strings.EqualFold(typeName, withNameCleaned)
+	})
+	if typeDecl == nil {
+		err = ErrNotFound
+	}
+	ret = &TypeInfo{
+		GenDecl:   typeDecl,
+		FileSet:   p.fset,
+		Filename:  filename,
+		FileBytes: p.fileBytes[filename],
+	}
+	return
+}
+
 // FindType returns information about a type in the package.
 // This causes the package to be (re)loaded/parsed into memory.
 // If the type cannot be found then ErrNotFound is returned in err.
@@ -828,6 +856,12 @@ func (p *Package) FindType(withName string) (ret *TypeInfo, err error) {
 }
 
 func (p *Package) findTypeDecl(withName string) (filename string, typeDecl *ast.GenDecl) {
+	return p.findTypeDeclMatch(func(typeName string) bool {
+		return withName == typeName
+	})
+}
+
+func (p *Package) findTypeDeclMatch(matchFunc func(typeName string) bool) (filename string, typeDecl *ast.GenDecl) {
 
 	for fn, af := range p.astf {
 		_ = fn
@@ -855,7 +889,7 @@ func (p *Package) findTypeDecl(withName string) (filename string, typeDecl *ast.
 			}
 
 			// from which we can extract and check the name
-			if typeSpec.Name.Name != withName {
+			if !matchFunc(typeSpec.Name.Name) {
 				continue
 			}
 

@@ -1,0 +1,216 @@
+{{define "HandlerUtil"}}
+const (
+    Create = "create"
+    Read = "read"
+    Update = "update"
+    Delete = "delete"
+)
+
+type Allower interface {
+    Allow(obj interface{}, perm string) bool
+}
+
+type AllowerFunc func(obj interface{}, perm string) bool
+
+func (f AllowerFunc) Allow(obj interface{}, perm string) bool {
+    return f(obj, perm)
+}
+
+func isJSONMimeType(mt string) bool {
+    mt = strings.TrimSpace(strings.SplitN(mt, ";", 2)[0])
+    if strings.EqualFold("application/json", mt) {
+        return true
+    }
+    return false
+}
+
+func param(r *http.Request, names ...string) string {
+    p := httprouter.ParamsFromContext(r.Context())
+    for _, name := range names {
+        value := p.ByName(name)
+        if value != "" {
+            return value
+        }
+        value = r.FormValue(name)
+        if value != "" {
+            return value
+        }
+    }
+    return ""
+}
+
+func scanParam(dst interface{}, paramVal string) (err error) {
+
+    // some common cases we can deal with simply
+    switch dstv := dst.(type) {
+    case *string:
+        *dstv = paramVal
+        return
+    case *int:
+        v, err := strconv.ParseInt(paramVal, 0, 0)
+        if err != nil {
+            return err
+        }
+        *dstv = int(v)
+        return
+    case *uint:
+        v, err := strconv.ParseUint(paramVal, 0, 0)
+        if err != nil {
+            return err
+        }
+        *dstv = uint(v)
+        return
+    case *int64:
+        *dstv, err = strconv.ParseInt(paramVal, 0, 64)
+        return
+    case *uint64:
+        *dstv, err = strconv.ParseUint(paramVal, 0, 64)
+        return
+    case *int32:
+        v, err := strconv.ParseInt(paramVal, 0, 32)
+        if err != nil {
+            return err
+        }
+        *dstv = int32(v)
+        return
+    case *uint32:
+        v, err := strconv.ParseUint(paramVal, 0, 32)
+        if err != nil {
+            return err
+        }
+        *dstv = uint32(v)
+        return
+    }
+
+    // or delegate to a JSON unmarshal func if available
+    if j, ok := dst.(json.Unmarshaler); ok {
+        // TODO: read json.Marshal source to see if it's worth adding a fast path for strings that don't need escaping
+        b, err := json.Marshal(paramVal)
+        if err != nil {
+            return err
+        }
+        return j.UnmarshalJSON(b)
+    }
+
+    return errors.New("unable to scan")
+}
+
+type httpStatusCoder interface {
+    HTTPStatusCode() int
+}
+
+var rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+type printfer interface {
+    Printf(format string, v ...interface{})
+}
+
+var logger printfer = log.Default()
+
+func writeErrf(w http.ResponseWriter, status int, err error, responseTextFormat string, args ...interface{}) {
+
+    // look for a httpStatusCoder or default to status 500 (internal server error)
+    sterr := err
+    for status <= 0 && sterr != nil {
+        s, ok := sterr.(httpStatusCoder)
+        if ok {
+            status = s.HTTPSTatusCode()
+            break
+        }
+        sterr = errors.Unwrap(sterr)
+    }
+    if status <= 0 {
+        status = 500
+    }
+
+    errID := fmt.Sprintf("%016x", rnd.Uint64())
+
+    w.Header().Set("X-Error-Id", errID)
+    w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+    w.WriteHeader(status)
+
+    var responseMessage string
+    if responseTextFormat != "" {
+        responseMessage = fmt.Fprintf(w, responseTextFormat, args...)
+    }
+    if responseMessage == "" {
+        responseMessage = http.StatusText(status)
+    }
+    if responseMessage == "" {
+        responseMessage = "unknown error"
+    }
+
+    fmt.Fprint(w, "<h1>")
+    fmt.Fprint(w, responseMessage)
+    fmt.Fprint(w, "</h1><p>")
+    fmt.Fprintf(w, "\n\nError ID: %s\n", errID)
+
+    if logger == nil {
+        return
+    }
+
+    _, file, line, _ := runtime.Caller(1)
+
+    logger.Printf("HTTP handler error ID %s at %s:%d: %v; message: %s\n", errID, file, line, err, responseMessage)
+}
+
+func writeErr(w http.ResponseWriter, status int, err error) {
+    writeErrf(w, status, err, "")
+}
+{{end}}
+
+{{define "Handler"}}
+type XYZHandler struct {
+    Allower
+    Store *store.XYZStore
+}
+{{end}}
+
+{{define "HandlerMethods"}}
+func (h *XYZHandler) GetByID(w http.ResponseWriter, r *http.Request) {
+    var err error
+    var ret store.XYZ
+    idParam := param(r, "id")
+    err = scanParam(&ret.XYZID, idParam)
+    if err != nil {
+        writeErrf(w, 400, err, "invalid ID %q", idParam)
+        return
+    }
+    err = h.Allow(&ret, Read)
+    if err != nil {
+        writeErrf(w, 403, err, "access not allowed to record with ID %v", id)
+        return
+    }
+    ret, err = h.Store.SelectByID(r.Context(), id)
+    if err != nil {
+        writeErrf(w, 0, err, "failed to load record with ID %v", id)
+        return
+    }
+    err = json.NewEncoder(w).Encode(ret)
+    if err != nil {
+        writeErrf(w, 0, err, "json encoding error")
+        return
+    }
+}
+
+/*
+func (h *XYZHandler) Post(w http.ResponseWriter, r *http.Request) {
+}
+
+func (h *XYZHandler) Patch(w http.ResponseWriter, r *http.Request) {
+}
+
+func (h *XYZHandler) Delete(w http.ResponseWriter, r *http.Request) {
+}
+
+func (h *XYZHandler) Select(w http.ResponseWriter, r *http.Request) {
+}
+
+func (h *XYZHandler) SelectCursor(w http.ResponseWriter, r *http.Request) {
+}
+*/
+{{end}}
+
+{{define "TestHandler"}}
+{{end}}
