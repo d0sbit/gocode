@@ -39,26 +39,7 @@ Each tool includes a set of built-in templates that it needs, and also supports 
 ## Notes
 
 TODO:
-* sqlcrud mvp:
-  - set up test harness so we can run through tmpl generation DONE (COMPILES)
-  - debug mysql startup/connection DONE
-  - get pressly goose migrations working
-    - add option to specify migrations package, with appropriate default logic ("migrations" next to the store folder) DONE
-    - make template for go file generation with example from https://github.com/pressly/goose#embedded-sql-migrations (SetBaseFS goes in init()) DONE
-    - add logic to create one empty migration file if no files in migration dir DONE
-    - main_test.go needs to include writing a table migration file, just like it writes types.go DONE
-    - update test to emit the correct import and call goose.Up() (after each db create) DONE
-  - mysql docker test case DONE
-  - attach tx to context DONE
-  - write out crud templates using sqlx
-    - separate transaction test case DONE
-    - Insert DONE
-    - SelectByID DONE
-    - Delete DONE
-    - Update DONE
-    - Select DONE
-    - Count DONE
-    - SelectCursor DONE
+* add to a list somewhere:
   - punchlist
     - try a few command line commands and make sure the basic stuff works
   - implement helpers in mongocrud (maybe move to backlog)
@@ -69,6 +50,10 @@ TODO:
   - mongo Count() needs sort also just like SQL so it can determine the index (move to backlog)
   - backlog: break up the tests so they track with which methods are included, and add the options too (-create, -read, etc.)
 * Handlers
+  - get it building
+  - Fill out the other CRUD methods
+  - on testing decide if we are using an interface with stub stuff, or if we are doing the whole docker test stuff or what: maybe we need the equivalent of the "make me a test store" function that can be used by other test packages
+  - NOTES:
   - see if we can express permissions with a super simple interface abstraction, e.g. CanRead(interface{}) bool, etc.
     it should be optional, but could let us have perms from the get-go without
   - both PUT and PATCH support

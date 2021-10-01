@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -194,9 +195,11 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 
 	// execute template
 	data := struct {
-		Struct *model.Struct
+		Struct          *model.Struct
+		StoreImportPath string
 	}{
-		Struct: s,
+		Struct:          s,
+		StoreImportPath: path.Join(modPath, storePkgPath),
 	}
 	tmpl, err := template.New("_main_").Funcs(funcMap).ParseFS(defaultTmplFS, "handlercrud.tmpl")
 	if err != nil {

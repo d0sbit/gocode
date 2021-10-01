@@ -1,4 +1,16 @@
 {{define "HandlerUtil"}}
+import "net/http"
+import "strings"
+import "strconv"
+import "encoding/json"
+import "fmt"
+import "time"
+import "log"
+import "errors"
+import "runtime"
+import mathrand "math/rand"
+import "github.com/julienschmidt/httprouter"
+
 const (
     Create = "create"
     Read = "read"
@@ -7,12 +19,12 @@ const (
 )
 
 type Allower interface {
-    Allow(obj interface{}, perm string) bool
+    Allow(obj interface{}, perm string) error
 }
 
-type AllowerFunc func(obj interface{}, perm string) bool
+type AllowerFunc func(obj interface{}, perm string) error
 
-func (f AllowerFunc) Allow(obj interface{}, perm string) bool {
+func (f AllowerFunc) Allow(obj interface{}, perm string) error {
     return f(obj, perm)
 }
 
@@ -52,34 +64,34 @@ func scanParam(dst interface{}, paramVal string) (err error) {
             return err
         }
         *dstv = int(v)
-        return
+        return nil
     case *uint:
         v, err := strconv.ParseUint(paramVal, 0, 0)
         if err != nil {
             return err
         }
         *dstv = uint(v)
-        return
+        return nil
     case *int64:
         *dstv, err = strconv.ParseInt(paramVal, 0, 64)
-        return
+        return nil
     case *uint64:
         *dstv, err = strconv.ParseUint(paramVal, 0, 64)
-        return
+        return nil
     case *int32:
         v, err := strconv.ParseInt(paramVal, 0, 32)
         if err != nil {
             return err
         }
         *dstv = int32(v)
-        return
+        return nil
     case *uint32:
         v, err := strconv.ParseUint(paramVal, 0, 32)
         if err != nil {
             return err
         }
         *dstv = uint32(v)
-        return
+        return nil
     }
 
     // or delegate to a JSON unmarshal func if available
@@ -92,14 +104,14 @@ func scanParam(dst interface{}, paramVal string) (err error) {
         return j.UnmarshalJSON(b)
     }
 
-    return errors.New("unable to scan")
+    return fmt.Errorf("don't know how to scan into %T", dst)
 }
 
 type httpStatusCoder interface {
     HTTPStatusCode() int
 }
 
-var rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+var rnd = mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
 
 type printfer interface {
     Printf(format string, v ...interface{})
@@ -114,7 +126,7 @@ func writeErrf(w http.ResponseWriter, status int, err error, responseTextFormat 
     for status <= 0 && sterr != nil {
         s, ok := sterr.(httpStatusCoder)
         if ok {
-            status = s.HTTPSTatusCode()
+            status = s.HTTPStatusCode()
             break
         }
         sterr = errors.Unwrap(sterr)
@@ -132,7 +144,7 @@ func writeErrf(w http.ResponseWriter, status int, err error, responseTextFormat 
 
     var responseMessage string
     if responseTextFormat != "" {
-        responseMessage = fmt.Fprintf(w, responseTextFormat, args...)
+        responseMessage = fmt.Sprintf(responseTextFormat, args...)
     }
     if responseMessage == "" {
         responseMessage = http.StatusText(status)
@@ -161,28 +173,41 @@ func writeErr(w http.ResponseWriter, status int, err error) {
 {{end}}
 
 {{define "Handler"}}
-type XYZHandler struct {
+{{if .StoreImportPath}}
+import store "{{.StoreImportPath}}"
+{{end}}
+
+type {{$.Struct.LocalName}}Handler struct {
     Allower
-    Store *store.XYZStore
+    Store *store.{{$.Struct.LocalName}}Store
 }
 {{end}}
 
 {{define "HandlerMethods"}}
-func (h *XYZHandler) GetByID(w http.ResponseWriter, r *http.Request) {
+import "net/http"
+import "encoding/json"
+{{if .StoreImportPath}}
+import store "{{.StoreImportPath}}"
+{{end}}
+
+
+func (h *{{$.Struct.LocalName}}Handler) GetByID(w http.ResponseWriter, r *http.Request) {
+    {{$idf := index $.Struct.FieldList.PK 0}}
     var err error
-    var ret store.XYZ
+    var in store.{{$.Struct.LocalName}}
     idParam := param(r, "id")
-    err = scanParam(&ret.XYZID, idParam)
+    err = scanParam(&in.{{$idf.GoName}}, idParam)
     if err != nil {
         writeErrf(w, 400, err, "invalid ID %q", idParam)
         return
     }
-    err = h.Allow(&ret, Read)
+    id := in.{{$idf.GoName}}
+    err = h.Allow(&in, Read)
     if err != nil {
         writeErrf(w, 403, err, "access not allowed to record with ID %v", id)
         return
     }
-    ret, err = h.Store.SelectByID(r.Context(), id)
+    ret, err := h.Store.SelectByID(r.Context(), id)
     if err != nil {
         writeErrf(w, 0, err, "failed to load record with ID %v", id)
         return

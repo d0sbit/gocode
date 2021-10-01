@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
@@ -49,7 +50,51 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 
 	flagSet.Parse(args)
 
-	_ = storeTestFileF
+	fileArgList := flagSet.Args()
+	if len(fileArgList) > 1 {
+		log.Fatalf("you cannot specify more than one file (%d found)", len(fileArgList))
+	}
+
+	// FIXME: for now if they provide an arg we just infer the various other params and overwrite them,
+	// this should be cleaned up at some point so it is consistent with gocode_handlercrud and whatever else
+	if len(fileArgList) == 1 {
+		fileArg := fileArgList[0]
+
+		rootFS, modDir, packagePath, modPath, err := srcedit.FindOSWdModuleDir(filepath.Dir(fileArg))
+		if err != nil {
+			log.Fatalf("error finding module directory: %v", err)
+		}
+		// if *vF {
+		// log.Printf("file arg step: rootFS=%v; modDir=%q, packagePath=%q, modPath=%q", rootFS, modDir, packagePath, modPath)
+		// }
+		inFS, err := fs.Sub(rootFS, modDir)
+		if err != nil {
+			log.Fatalf("fs.Sub error while construct input fs: %v", err)
+		}
+
+		// we won't be writing here so don't bother with outFS
+		storePkg := srcedit.NewPackage(inFS, inFS, modPath, packagePath)
+
+		// now that we have all of this stuff hacked in here,
+		// we can look for the type based on the file name
+		typeSearch := strings.TrimSuffix(filepath.Base(fileArg), ".go")
+		typeInfo, err := storePkg.FindTypeLoose(typeSearch)
+		if err != nil {
+			log.Fatalf("failed to find type for %q: %v", typeSearch, err)
+		}
+
+		// ast.Print(typeInfo.FileSet, typeInfo.GenDecl)
+		*typeF = typeInfo.Name()
+
+		*fileF = filepath.Base(fileArg)
+
+		// testFileF can just be inferred below
+		// storeFileF and storeTestFileF are fine as-is too
+
+		// packageF needs to come from FindOSWdModuleDir
+		*packageF = packagePath
+
+	}
 
 	typeName := *typeF
 	if typeName == "" {
@@ -117,8 +162,10 @@ func maine(flagSet *flag.FlagSet, args []string) int {
 	pkg := srcedit.NewPackage(inFS, outFS, modPath, packagePath)
 
 	// load the migrations package
-	log.Printf("NewPackage for migrations: inFS=%#v, outFS=%#v, modPath=%#v, migrationsPackagePath=%#v",
-		inFS, outFS, modPath, migrationsPackagePath)
+	if *vF {
+		log.Printf("NewPackage for migrations: inFS=%#v, outFS=%#v, modPath=%#v, migrationsPackagePath=%#v",
+			inFS, outFS, modPath, migrationsPackagePath)
+	}
 	migrationsPkg := srcedit.NewPackage(inFS, outFS, modPath, migrationsPackagePath)
 
 	// get the definition for the specified type

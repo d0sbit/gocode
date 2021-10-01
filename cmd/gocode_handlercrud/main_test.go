@@ -4,13 +4,19 @@ import (
 	"flag"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
 
 func TestMaineExec(t *testing.T) {
 
-	// tests with execution of `go test` - requires "docker run ..." etc to work
+	// uses sqlcrud to create the store, which this depends on, and then
+	// tests the final output code with `go test` - requires "docker run ..." etc to work
+	cmd := exec.Command("go", "install", "../gocode_sqlcrud")
+	b, err := cmd.CombinedOutput()
+	t.Logf("go install cmd output: %s", b)
+	must(t, err)
 
 	var modDir string
 	modDir = t.TempDir()
@@ -37,12 +43,18 @@ type Example struct {
 	Name string `+"`db:\"name\"`"+`
 }
 
-func (a *Example) IDAssign() { a.ID = IDString() }
+//func (a *Example) IDAssign() { a.ID = IDString() }
 
 `), 0644))
 
 	// 	// run the code generator
 	must(t, os.Chdir(modDir))
+
+	// run sqlcrud generator first, so there is a working store
+	cmd = exec.Command("gocode_sqlcrud", "store/example.go")
+	b, err = cmd.CombinedOutput()
+	t.Logf("gocode_sqlcrud cmd output: %s", b)
+	must(t, err)
 
 	flset := flag.NewFlagSet(os.Args[0], flag.PanicOnError)
 	ret := maine(flset, []string{"-v", "handlers/example.go"})
@@ -50,17 +62,17 @@ func (a *Example) IDAssign() { a.ID = IDString() }
 		t.Errorf("ret = %d", ret)
 	}
 
-	// cmd := exec.Command("go", "get", "./...")
-	// cmd.Dir = modDir
-	// b, err := cmd.CombinedOutput()
-	// t.Logf("go get cmd output: %s", b)
-	// must(t, err)
+	cmd = exec.Command("go", "get", "./...")
+	cmd.Dir = modDir
+	b, err = cmd.CombinedOutput()
+	t.Logf("go get cmd output: %s", b)
+	must(t, err)
 
-	// cmd = exec.Command("go", "test", "-v", "./...")
-	// cmd.Dir = modDir
-	// b, err = cmd.CombinedOutput()
-	// t.Logf("test cmd output: %s", b)
-	// must(t, err)
+	cmd = exec.Command("go", "test", "-v", "./handlers")
+	cmd.Dir = modDir
+	b, err = cmd.CombinedOutput()
+	t.Logf("test cmd output: %s", b)
+	must(t, err)
 
 }
 
